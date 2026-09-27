@@ -9,15 +9,17 @@
     "dev:backend": "node server/index.js",
     "dev": "concurrently -k -n \"FE,BE\" -c \"cyan,green\" \"npm run dev:frontend\" \"npm run dev:backend\"",
     "build": "vite build",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "serve": "vite build && node server/index.js"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
+    "@line/liff": "^2.31.0",
     "canvas-confetti": "^1.9.4",
     "chart.js": "^4.5.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "lucide-react": "^1.47.0",
+    "pg": "^8.23.0",
     "react": "^19.3.0",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^19.3.0"

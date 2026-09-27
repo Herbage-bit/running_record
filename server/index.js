@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import db from './db.js';
-import { buildFlexMessage, buildTextMessage, sendLinePushMessage, formatPace, formatDuration } from './lineService.js';
+import { query, queryOne, initDatabase } from './db.js';
+import { requireMember, requireAdmin, AUTH_MODE } from './auth.js';
+import { buildFlexMessage, buildTextMessage, sendLinePushMessage } from './lineService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,223 +13,297 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+const DIST_DIR = path.join(__dirname, '..', 'dist');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const AVATAR_DIR = path.join(UPLOADS_DIR, 'avatars');
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
+
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // Allows base64 image upload if user takes photos
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.json({ limit: '10mb' })); // Allows base64 image upload
+app.use('/uploads', express.static(UPLOADS_DIR));
+// Built frontend (npm run build); lets one ngrok tunnel serve both page and API
+app.use(express.static(DIST_DIR));
 
 // Helper to get setting value
-function getSetting(key, defaultValue = '') {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+async function getSetting(key, defaultValue = '') {
+  const row = await queryOne('SELECT value FROM settings WHERE key = $1', [key]);
   return row ? row.value : defaultValue;
 }
 
 // Helper to set setting value
-function setSetting(key, value) {
-  const stmt = db.prepare(`
-    INSERT INTO settings (key, value) VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `);
-  stmt.run(key, value);
+async function setSetting(key, value) {
+  await query(
+    `INSERT INTO settings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [key, value]
+  );
 }
 
-// ==========================================
-// USERS API
-// ==========================================
+// LINE requires absolute https image URLs; uploaded avatars are stored as relative paths
+function toAbsoluteUrl(url, req) {
+  if (!url || /^https?:\/\//.test(url)) return url;
+  const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return `${base}${url}`;
+}
 
-// Get all users
-app.get('/api/users', (req, res) => {
-  const users = db.prepare(`
-    SELECT u.*, 
-      COALESCE(COUNT(r.id), 0) as total_runs,
-      COALESCE(SUM(r.distance), 0) as total_distance
-    FROM users u
-    LEFT JOIN runs r ON u.id = r.user_id
-    GROUP BY u.id
-    ORDER BY total_distance DESC
-  `).all();
-  res.json(users);
+// Link used in LINE messages: open the LIFF app inside LINE when configured
+function appLinkUrl(req) {
+  if (process.env.LINE_LIFF_ID) return `https://liff.line.me/${process.env.LINE_LIFF_ID}`;
+  return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+}
+
+// Period filter on runs alias `r` (session timezone = APP_TIMEZONE, so ::date is the local day)
+function periodCondition(period) {
+  if (period === 'today') return 'r.created_at::date = CURRENT_DATE';
+  if (period === 'week') return "r.created_at::date >= CURRENT_DATE - INTERVAL '6 days'";
+  if (period === 'month') return "date_trunc('month', r.created_at) = date_trunc('month', now())";
+  return 'TRUE';
+}
+
+const MEMBER_PUBLIC_COLUMNS = 'id, name, avatar, position, created_at';
+
+// Public: frontend needs to know how to log in before calling other APIs
+app.get('/api/config', (req, res) => {
+  res.json({ authMode: AUTH_MODE, liffId: process.env.LINE_LIFF_ID || null });
 });
 
-// Add a new user
-app.post('/api/users', (req, res) => {
-  const { name, avatar, bio } = req.body;
-  if (!name || !name.trim()) {
+// All API routes below require an approved (active) member
+app.use('/api', requireMember);
+
+// ==========================================
+// ME (目前登入者 / 個人基本資料)
+// ==========================================
+
+app.get('/api/me', (req, res) => {
+  const { id, line_id, name, avatar, position, created_at } = req.member;
+  res.json({ id, line_id, name, avatar, position, created_at });
+});
+
+app.put('/api/me', async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) {
     return res.status(400).json({ error: '姓名為必填欄位' });
   }
-
-  const defaultAvatar = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(name)}`;
-  try {
-    const info = db.prepare(`
-      INSERT INTO users (name, avatar, bio) VALUES (?, ?, ?)
-    `).run(name.trim(), avatar || defaultAvatar, bio || '熱血開跑中！');
-    const newUser = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
-    res.status(201).json(newUser);
-  } catch (err) {
-    if (err.message.includes('UNIQUE')) {
-      return res.status(400).json({ error: '跑者暱稱已存在，請使用不同名稱' });
-    }
-    res.status(500).json({ error: err.message });
+  if (name.length > 50) {
+    return res.status(400).json({ error: '姓名最多 50 個字' });
   }
+  const updated = await queryOne(
+    `UPDATE members SET name = $1, updated_at = now() WHERE id = $2
+     RETURNING id, line_id, name, avatar, position, created_at`,
+    [name, req.member.id]
+  );
+  res.json(updated);
+});
+
+const AVATAR_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+// Body: { image: "data:image/jpeg;base64,..." }
+app.post('/api/me/avatar', async (req, res) => {
+  const match = /^data:(image\/[a-z]+);base64,(.+)$/.exec(req.body.image || '');
+  const ext = match && AVATAR_TYPES[match[1]];
+  if (!ext) {
+    return res.status(400).json({ error: '僅支援 JPG / PNG / WebP 圖片' });
+  }
+  const buffer = Buffer.from(match[2], 'base64');
+  if (buffer.length > AVATAR_MAX_BYTES) {
+    return res.status(400).json({ error: '圖片大小不可超過 2MB' });
+  }
+
+  const filename = `${req.member.id}-${Date.now()}.${ext}`;
+  await fs.promises.writeFile(path.join(AVATAR_DIR, filename), buffer);
+
+  const oldAvatar = req.member.avatar;
+  const updated = await queryOne(
+    `UPDATE members SET avatar = $1, updated_at = now() WHERE id = $2
+     RETURNING id, line_id, name, avatar, position, created_at`,
+    [`/uploads/avatars/${filename}`, req.member.id]
+  );
+
+  // Remove the previous uploaded avatar file
+  if (oldAvatar?.startsWith('/uploads/avatars/')) {
+    fs.promises.unlink(path.join(AVATAR_DIR, path.basename(oldAvatar))).catch(() => {});
+  }
+
+  res.json(updated);
+});
+
+// ==========================================
+// MEMBERS API
+// ==========================================
+
+// All approved members (ranked by total distance); line_id only visible to admins
+app.get('/api/members', async (req, res) => {
+  const isAdmin = req.member.position === 'admin';
+  const { rows } = await query(`
+    SELECT ${MEMBER_PUBLIC_COLUMNS.split(', ').map(c => `m.${c}`).join(', ')}
+      ${isAdmin ? ', m.line_id' : ''},
+      COUNT(r.id) AS total_runs,
+      COALESCE(SUM(r.distance), 0) AS total_distance
+    FROM members m
+    LEFT JOIN runs r ON m.id = r.member_id
+    WHERE m.status = 'active'
+    GROUP BY m.id
+    ORDER BY total_distance DESC, m.id ASC
+  `);
+  res.json(rows);
+});
+
+// Admin: join requests waiting for approval
+app.get('/api/members/pending', requireAdmin, async (req, res) => {
+  const { rows } = await query(
+    `SELECT ${MEMBER_PUBLIC_COLUMNS}, line_id FROM members WHERE status = 'pending' ORDER BY created_at ASC`
+  );
+  res.json(rows);
+});
+
+// Admin: approve a join request
+app.post('/api/members/:id/approve', requireAdmin, async (req, res) => {
+  const approved = await queryOne(
+    `UPDATE members SET status = 'active', updated_at = now()
+     WHERE id = $1 AND status = 'pending'
+     RETURNING ${MEMBER_PUBLIC_COLUMNS}, line_id`,
+    [parseInt(req.params.id, 10)]
+  );
+  if (!approved) {
+    return res.status(404).json({ error: '找不到該筆待審核申請' });
+  }
+  res.json(approved);
+});
+
+// Admin: remove a member or reject a join request (their runs are deleted by cascade)
+app.delete('/api/members/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (id === req.member.id) {
+    return res.status(400).json({ error: '無法刪除自己的帳號' });
+  }
+  const deleted = await queryOne('DELETE FROM members WHERE id = $1 RETURNING id, avatar', [id]);
+  if (!deleted) {
+    return res.status(404).json({ error: '找不到該成員' });
+  }
+  if (deleted.avatar?.startsWith('/uploads/avatars/')) {
+    fs.promises.unlink(path.join(AVATAR_DIR, path.basename(deleted.avatar))).catch(() => {});
+  }
+  res.json({ success: true });
 });
 
 // ==========================================
 // RUNS API
 // ==========================================
 
-// Get runs with optional user_id and period filters
-app.get('/api/runs', (req, res) => {
-  const { user_id, period } = req.query;
-  const conditions = [];
+// Get runs with optional member_id and period filters (everyone can view everyone's runs)
+app.get('/api/runs', async (req, res) => {
+  const { member_id, period } = req.query;
+  const conditions = [periodCondition(period)];
   const params = [];
 
-  if (user_id) {
-    conditions.push('r.user_id = ?');
-    params.push(user_id);
+  if (member_id) {
+    params.push(parseInt(member_id, 10));
+    conditions.push(`r.member_id = $${params.length}`);
   }
 
-  if (period === 'today') {
-    conditions.push("DATE(r.created_at, 'localtime') = DATE('now', 'localtime')");
-  } else if (period === 'week') {
-    conditions.push("DATE(r.created_at, 'localtime') >= DATE('now', 'localtime', '-6 days')");
-  } else if (period === 'month') {
-    conditions.push("strftime('%Y-%m', r.created_at, 'localtime') = strftime('%Y-%m', 'now', 'localtime')");
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  const runs = db.prepare(`
-    SELECT 
+  const { rows } = await query(`
+    SELECT
       r.*,
-      u.name as user_name,
-      u.avatar as user_avatar,
-      (SELECT COUNT(*) FROM cheers c WHERE c.run_id = r.id AND c.type = 'fire') as fire_count,
-      (SELECT COUNT(*) FROM cheers c WHERE c.run_id = r.id AND c.type = 'like') as like_count,
-      (SELECT COUNT(*) FROM cheers c WHERE c.run_id = r.id AND c.type = 'nudge') as nudge_count
+      m.name AS user_name,
+      m.avatar AS user_avatar,
+      (SELECT COUNT(*) FROM cheers c WHERE c.run_id = r.id AND c.type = 'fire') AS fire_count,
+      (SELECT COUNT(*) FROM cheers c WHERE c.run_id = r.id AND c.type = 'like') AS like_count,
+      (SELECT COUNT(*) FROM cheers c WHERE c.run_id = r.id AND c.type = 'nudge') AS nudge_count
     FROM runs r
-    JOIN users u ON r.user_id = u.id
-    ${whereClause}
+    JOIN members m ON r.member_id = m.id
+    WHERE ${conditions.join(' AND ')}
     ORDER BY r.created_at DESC
     LIMIT 100
-  `).all(...params);
+  `, params);
 
-  res.json(runs);
+  res.json(rows);
 });
 
-// Create a new run record and optionally push to LINE
+// Create a run for the logged-in member and optionally push to LINE
 app.post('/api/runs', async (req, res) => {
-  try {
-    const {
-      user_id,
-      distance,
-      duration_seconds,
-      pace_seconds: inputPace,
-      heart_rate,
-      run_type = 'road',
-      photo_url,
-      quote,
-      notify_line = true
-    } = req.body;
+  const {
+    distance,
+    duration_seconds,
+    pace_seconds: inputPace,
+    heart_rate,
+    run_type = 'road',
+    photo_url,
+    quote,
+    notify_line = true
+  } = req.body;
 
-    const dist = parseFloat(distance);
-    if (!user_id || !dist || dist <= 0) {
-      return res.status(400).json({ error: '請提供有效的跑者與跑步里程' });
-    }
+  const dist = parseFloat(distance);
+  if (!dist || dist <= 0) {
+    return res.status(400).json({ error: '請提供有效的跑步里程' });
+  }
 
-    const duration = parseInt(duration_seconds) || 0;
-    // Calculate pace if not provided or derive
-    let pace = parseInt(inputPace) || 0;
-    if (!pace && duration > 0 && dist > 0) {
-      pace = Math.round(duration / dist);
-    } else if (pace > 0 && duration === 0) {
-      // If pace is given but duration not, calculate duration
-      duration = Math.round(pace * dist);
-    }
+  let duration = parseInt(duration_seconds) || 0;
+  let pace = parseInt(inputPace) || 0;
+  if (!pace && duration > 0) {
+    pace = Math.round(duration / dist);
+  } else if (pace > 0 && duration === 0) {
+    duration = Math.round(pace * dist);
+  }
 
-    const runner = db.prepare('SELECT * FROM users WHERE id = ?').get(user_id);
-    if (!runner) {
-      return res.status(404).json({ error: '找不到該跑者' });
-    }
-
-    const insertStmt = db.prepare(`
-      INSERT INTO runs (user_id, distance, duration_seconds, pace_seconds, heart_rate, run_type, photo_url, quote, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `);
-
-    const result = insertStmt.run(
-      user_id,
+  // 成績一律記在登入者本人名下，不採用前端傳來的 member_id
+  const runner = req.member;
+  const createdRun = await queryOne(
+    `INSERT INTO runs (member_id, distance, duration_seconds, pace_seconds, heart_rate, run_type, photo_url, quote)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *, $9::text AS user_name, $10::text AS user_avatar`,
+    [
+      runner.id,
       dist,
       duration,
       pace,
       heart_rate ? parseInt(heart_rate) : null,
       run_type,
       photo_url || null,
-      quote ? quote.trim() : null
-    );
+      quote ? quote.trim() : null,
+      runner.name,
+      runner.avatar
+    ]
+  );
 
-    const createdRun = db.prepare(`
-      SELECT 
-        r.*,
-        u.name as user_name,
-        u.avatar as user_avatar
-      FROM runs r
-      JOIN users u ON r.user_id = u.id
-      WHERE r.id = ?
-    `).get(result.lastInsertRowid);
+  const clientUrl = appLinkUrl(req);
+  const lineRunner = { ...runner, avatar: toAbsoluteUrl(runner.avatar, req) };
+  const flexMessage = buildFlexMessage(createdRun, lineRunner, clientUrl);
+  const textFallback = buildTextMessage(createdRun, lineRunner, clientUrl);
 
-    // Build LINE messages
-    const hostHeader = req.get('host');
-    const protocol = req.protocol;
-    const clientUrl = `${protocol}://${hostHeader}`;
-    const flexMessage = buildFlexMessage(createdRun, runner, clientUrl);
-    const textFallback = buildTextMessage(createdRun, runner, clientUrl);
-
-    let linePushResult = null;
-    if (notify_line) {
-      const lineToken = getSetting('line_channel_access_token');
-      const lineTarget = getSetting('line_group_id');
-      linePushResult = await sendLinePushMessage({
-        token: lineToken,
-        to: lineTarget,
-        flexMessage,
-        textFallback
-      });
-    }
-
-    res.status(201).json({
-      run: {
-        ...createdRun,
-        fire_count: 0,
-        like_count: 0,
-        nudge_count: 0
-      },
-      linePush: linePushResult,
+  let linePushResult = null;
+  if (notify_line) {
+    linePushResult = await sendLinePushMessage({
+      token: await getSetting('line_channel_access_token'),
+      to: await getSetting('line_group_id'),
       flexMessage,
       textFallback
     });
-  } catch (err) {
-    console.error('Error creating run:', err);
-    res.status(500).json({ error: err.message });
   }
+
+  res.status(201).json({
+    run: { ...createdRun, fire_count: 0, like_count: 0, nudge_count: 0 },
+    linePush: linePushResult,
+    flexMessage,
+    textFallback
+  });
 });
 
 // Cheer / Nudge a run
-app.post('/api/runs/:id/cheer', (req, res) => {
-  const runId = req.params.id;
-  const { user_name = '匿名跑友', type = 'fire' } = req.body;
-
+app.post('/api/runs/:id/cheer', async (req, res) => {
+  const runId = parseInt(req.params.id, 10);
   const validTypes = ['fire', 'like', 'nudge'];
-  const cheerType = validTypes.includes(type) ? type : 'fire';
+  const cheerType = validTypes.includes(req.body.type) ? req.body.type : 'fire';
 
-  db.prepare(`
-    INSERT INTO cheers (run_id, user_name, type) VALUES (?, ?, ?)
-  `).run(runId, user_name, cheerType);
+  await query('INSERT INTO cheers (run_id, user_name, type) VALUES ($1, $2, $3)', [runId, req.member.name, cheerType]);
 
-  const counts = db.prepare(`
-    SELECT 
-      (SELECT COUNT(*) FROM cheers WHERE run_id = ? AND type = 'fire') as fire_count,
-      (SELECT COUNT(*) FROM cheers WHERE run_id = ? AND type = 'like') as like_count,
-      (SELECT COUNT(*) FROM cheers WHERE run_id = ? AND type = 'nudge') as nudge_count
-  `).get(runId, runId, runId);
+  const counts = await queryOne(`
+    SELECT
+      COUNT(*) FILTER (WHERE type = 'fire') AS fire_count,
+      COUNT(*) FILTER (WHERE type = 'like') AS like_count,
+      COUNT(*) FILTER (WHERE type = 'nudge') AS nudge_count
+    FROM cheers WHERE run_id = $1
+  `, [runId]);
 
   res.json({ success: true, counts });
 });
@@ -236,72 +312,53 @@ app.post('/api/runs/:id/cheer', (req, res) => {
 // STATS & LEADERBOARD API
 // ==========================================
 
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
   const period = req.query.period || 'week'; // 'today' | 'week' | 'month' | 'all'
+  const dateFilter = periodCondition(period);
 
-  let dateFilter = '';
-  if (period === 'today') {
-    dateFilter = "DATE(r.created_at, 'localtime') = DATE('now', 'localtime')";
-  } else if (period === 'week') {
-    dateFilter = "DATE(r.created_at, 'localtime') >= DATE('now', 'localtime', '-6 days')";
-  } else if (period === 'month') {
-    dateFilter = "strftime('%Y-%m', r.created_at, 'localtime') = strftime('%Y-%m', 'now', 'localtime')";
-  } else {
-    dateFilter = "1=1";
-  }
-
-  // Leaderboard for selected period
-  const leaderboard = db.prepare(`
-    SELECT 
-      u.id as user_id,
-      u.name,
-      u.avatar,
-      COALESCE(SUM(r.distance), 0) as total_distance,
-      COALESCE(COUNT(r.id), 0) as run_count,
-      COALESCE(SUM(r.duration_seconds), 0) as total_duration,
-      MIN(CASE WHEN r.distance >= 3 THEN r.pace_seconds ELSE NULL END) as best_pace_seconds,
-      ROUND(AVG(r.pace_seconds)) as avg_pace_seconds
-    FROM users u
-    LEFT JOIN runs r ON u.id = r.user_id AND ${dateFilter}
-    GROUP BY u.id
+  const { rows: leaderboard } = await query(`
+    SELECT
+      m.id AS user_id,
+      m.name,
+      m.avatar,
+      COALESCE(SUM(r.distance), 0) AS total_distance,
+      COUNT(r.id) AS run_count,
+      COALESCE(SUM(r.duration_seconds), 0) AS total_duration,
+      MIN(CASE WHEN r.distance >= 3 THEN r.pace_seconds END) AS best_pace_seconds,
+      ROUND(AVG(r.pace_seconds)) AS avg_pace_seconds
+    FROM members m
+    LEFT JOIN runs r ON m.id = r.member_id AND ${dateFilter}
+    WHERE m.status = 'active'
+    GROUP BY m.id
     ORDER BY total_distance DESC, total_duration ASC
-  `).all();
+  `);
 
-  // Team aggregated stats for period
-  const teamAgg = db.prepare(`
-    SELECT 
-      COALESCE(SUM(distance), 0) as total_team_distance,
-      COALESCE(COUNT(id), 0) as total_team_runs,
-      COALESCE(SUM(duration_seconds), 0) as total_team_duration,
-      ROUND(AVG(pace_seconds)) as avg_team_pace
+  const teamAgg = await queryOne(`
+    SELECT
+      COALESCE(SUM(distance), 0) AS total_team_distance,
+      COUNT(id) AS total_team_runs,
+      COALESCE(SUM(duration_seconds), 0) AS total_team_duration,
+      ROUND(AVG(pace_seconds)) AS avg_team_pace
     FROM runs r
     WHERE ${dateFilter}
-  `).get();
+  `);
 
-  // Monthly goal progress
-  const monthlyGoalKm = parseFloat(getSetting('team_monthly_goal_km', '250'));
-  const monthCurrent = db.prepare(`
-    SELECT COALESCE(SUM(distance), 0) as total
-    FROM runs
-    WHERE strftime('%Y-%m', created_at, 'localtime') = strftime('%Y-%m', 'now', 'localtime')
-  `).get().total;
+  const monthlyGoalKm = parseFloat(await getSetting('team_monthly_goal_km', '250'));
+  const { total: monthCurrent } = await queryOne(`
+    SELECT COALESCE(SUM(distance), 0) AS total FROM runs r WHERE ${periodCondition('month')}
+  `);
 
   // Recent 7 days chart data
-  const chartDays = db.prepare(`
-    WITH RECURSIVE dates(date) AS (
-      SELECT DATE('now', 'localtime', '-6 days')
-      UNION ALL
-      SELECT DATE(date, '+1 day') FROM dates WHERE date < DATE('now', 'localtime')
-    )
-    SELECT 
-      d.date,
-      strftime('%m/%d', d.date) as display_date,
-      COALESCE(SUM(r.distance), 0) as total_distance
-    FROM dates d
-    LEFT JOIN runs r ON DATE(r.created_at, 'localtime') = d.date
+  const { rows: chartDays } = await query(`
+    SELECT
+      to_char(d.date, 'YYYY-MM-DD') AS date,
+      to_char(d.date, 'MM/DD') AS display_date,
+      COALESCE(SUM(r.distance), 0) AS total_distance
+    FROM generate_series(CURRENT_DATE - 6, CURRENT_DATE, INTERVAL '1 day') AS d(date)
+    LEFT JOIN runs r ON r.created_at::date = d.date::date
     GROUP BY d.date
     ORDER BY d.date ASC
-  `).all();
+  `);
 
   res.json({
     period,
@@ -317,38 +374,92 @@ app.get('/api/stats', (req, res) => {
 });
 
 // ==========================================
+// RACES API (目標賽事倒數)
+// ==========================================
+
+// start_local: 以 APP_TIMEZONE 表示的 "YYYY-MM-DDTHH:MM"，給前端表單直接使用；
+// upcoming: 賽事當天結束前都算 (首頁倒數顯示用)
+const RACE_COLUMNS = `
+  id, name, start_at,
+  to_char(start_at, 'YYYY-MM-DD"T"HH24:MI') AS start_local,
+  start_at::date >= CURRENT_DATE AS upcoming,
+  created_at, updated_at`;
+
+// Body: { name, start_local: "2026-12-20T06:30" } (interpreted in the session timezone)
+function parseRaceBody(body) {
+  const name = (body.name || '').trim();
+  const startLocal = body.start_local || '';
+  if (!name) return { error: '賽事名稱為必填欄位' };
+  if (name.length > 100) return { error: '賽事名稱最多 100 個字' };
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(startLocal) || Number.isNaN(Date.parse(startLocal))) {
+    return { error: '請提供有效的賽事日期' };
+  }
+  return { name, startLocal };
+}
+
+app.get('/api/races', async (req, res) => {
+  const { rows } = await query(`SELECT ${RACE_COLUMNS} FROM races ORDER BY start_at ASC, id ASC`);
+  res.json(rows);
+});
+
+app.post('/api/races', requireAdmin, async (req, res) => {
+  const { name, startLocal, error } = parseRaceBody(req.body);
+  if (error) return res.status(400).json({ error });
+  const created = await queryOne(
+    `INSERT INTO races (name, start_at, created_by) VALUES ($1, $2::timestamp, $3)
+     RETURNING ${RACE_COLUMNS}`,
+    [name, startLocal, req.member.id]
+  );
+  res.status(201).json(created);
+});
+
+app.put('/api/races/:id', requireAdmin, async (req, res) => {
+  const { name, startLocal, error } = parseRaceBody(req.body);
+  if (error) return res.status(400).json({ error });
+  const updated = await queryOne(
+    `UPDATE races SET name = $1, start_at = $2::timestamp, updated_at = now() WHERE id = $3
+     RETURNING ${RACE_COLUMNS}`,
+    [name, startLocal, parseInt(req.params.id, 10)]
+  );
+  if (!updated) return res.status(404).json({ error: '找不到該賽事' });
+  res.json(updated);
+});
+
+app.delete('/api/races/:id', requireAdmin, async (req, res) => {
+  const deleted = await queryOne('DELETE FROM races WHERE id = $1 RETURNING id', [parseInt(req.params.id, 10)]);
+  if (!deleted) return res.status(404).json({ error: '找不到該賽事' });
+  res.json({ success: true });
+});
+
+// ==========================================
 // SETTINGS & LINE TESTING API
 // ==========================================
 
-app.get('/api/settings', (req, res) => {
-  const lineToken = getSetting('line_channel_access_token');
-  const lineTarget = getSetting('line_group_id');
-  const teamGoal = getSetting('team_monthly_goal_km', '250');
-  const botName = getSetting('bot_name', '跑友圈打卡小幫手');
-
+app.get('/api/settings', async (req, res) => {
+  const lineToken = await getSetting('line_channel_access_token');
   res.json({
     hasToken: Boolean(lineToken && lineToken.length > 20),
     line_channel_access_token: lineToken ? `${lineToken.substring(0, 10)}...${lineToken.slice(-6)}` : '',
-    line_group_id: lineTarget,
-    team_monthly_goal_km: teamGoal,
-    bot_name: botName
+    line_group_id: await getSetting('line_group_id'),
+    team_monthly_goal_km: await getSetting('team_monthly_goal_km', '250'),
+    bot_name: await getSetting('bot_name', '跑友圈打卡小幫手')
   });
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', async (req, res) => {
   const { line_channel_access_token, line_group_id, team_monthly_goal_km, bot_name } = req.body;
 
   if (line_channel_access_token !== undefined && !line_channel_access_token.includes('...')) {
-    setSetting('line_channel_access_token', line_channel_access_token.trim());
+    await setSetting('line_channel_access_token', line_channel_access_token.trim());
   }
   if (line_group_id !== undefined) {
-    setSetting('line_group_id', line_group_id.trim());
+    await setSetting('line_group_id', line_group_id.trim());
   }
   if (team_monthly_goal_km !== undefined) {
-    setSetting('team_monthly_goal_km', String(parseFloat(team_monthly_goal_km) || 250));
+    await setSetting('team_monthly_goal_km', String(parseFloat(team_monthly_goal_km) || 250));
   }
   if (bot_name !== undefined) {
-    setSetting('bot_name', bot_name.trim());
+    await setSetting('bot_name', bot_name.trim());
   }
 
   res.json({ success: true, message: '設定已成功儲存' });
@@ -357,10 +468,10 @@ app.post('/api/settings', (req, res) => {
 // Test LINE push
 app.post('/api/settings/test-line', async (req, res) => {
   const { line_channel_access_token, line_group_id } = req.body;
-  const token = line_channel_access_token && !line_channel_access_token.includes('...') 
-    ? line_channel_access_token.trim() 
-    : getSetting('line_channel_access_token');
-  const target = line_group_id ? line_group_id.trim() : getSetting('line_group_id');
+  const token = line_channel_access_token && !line_channel_access_token.includes('...')
+    ? line_channel_access_token.trim()
+    : await getSetting('line_channel_access_token');
+  const target = line_group_id ? line_group_id.trim() : await getSetting('line_group_id');
 
   if (!token || !target) {
     return res.status(400).json({
@@ -382,20 +493,37 @@ app.post('/api/settings/test-line', async (req, res) => {
     avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'
   };
 
-  const clientUrl = `${req.protocol}://${req.get('host')}`;
-  const flexMessage = buildFlexMessage(dummyRun, dummyRunner, clientUrl);
-  const textFallback = buildTextMessage(dummyRun, dummyRunner, clientUrl);
-
+  const clientUrl = appLinkUrl(req);
   const result = await sendLinePushMessage({
     token,
     to: target,
-    flexMessage,
-    textFallback
+    flexMessage: buildFlexMessage(dummyRun, dummyRunner, clientUrl),
+    textFallback: buildTextMessage(dummyRun, dummyRunner, clientUrl)
   });
 
   res.json(result);
 });
 
-app.listen(PORT, () => {
-  console.log(`🏃 RunSync Server running at http://localhost:${PORT}`);
+// SPA fallback: non-API routes return the built index.html
+app.get(/^(?!\/api\/|\/uploads\/).*/, (req, res, next) => {
+  const indexHtml = path.join(DIST_DIR, 'index.html');
+  if (!fs.existsSync(indexHtml)) return next();
+  res.sendFile(indexHtml);
 });
+
+// Error handler (Express 5 forwards rejected async handlers here)
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: err.message || '伺服器錯誤' });
+});
+
+initDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`🏃 RunSync Server running at http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('❌ 資料庫初始化失敗:', err.message);
+    process.exit(1);
+  });

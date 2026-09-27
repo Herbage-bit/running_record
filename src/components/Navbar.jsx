@@ -1,25 +1,35 @@
 import React, { useState } from 'react';
-import { Flame, Plus, Settings, UserCheck, MessageSquare, ChevronDown } from 'lucide-react';
+import { Flame, Settings, UserCheck, ChevronDown, UserRound, ShieldCheck, Flag } from 'lucide-react';
+import Avatar from './Avatar';
+
+const menuItemStyle = {
+  width: '100%',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  padding: '8px',
+  background: 'transparent',
+  border: 'none',
+  borderRadius: '8px',
+  color: '#F8FAFC',
+  fontSize: '0.85rem',
+  cursor: 'pointer',
+  textAlign: 'left'
+};
 
 export default function Navbar({
-  users,
-  currentUser,
-  onSelectUser,
-  onOpenLogModal,
+  me,
+  members,
+  viewingMember,
+  onSelectMember,
+  onNavigate,
   onOpenSettings,
-  hasLineToken,
-  onAddUser
+  hasLineToken
 }) {
   const [showDropdown, setShowDropdown] = useState(false);
-  const [isAddingUser, setIsAddingUser] = useState(false);
-  const [newUserName, setNewUserName] = useState('');
 
-  const handleCreateUser = (e) => {
-    e.preventDefault();
-    if (!newUserName.trim()) return;
-    onAddUser(newUserName.trim());
-    setNewUserName('');
-    setIsAddingUser(false);
+  const go = (route) => {
+    onNavigate(route);
     setShowDropdown(false);
   };
 
@@ -89,9 +99,9 @@ export default function Navbar({
           </div>
         </div>
 
-        {/* User Switcher & Actions */}
+        {/* Member Viewer & Actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-          {/* User Switcher Dropdown */}
+          {/* Member Dropdown */}
           <div style={{ position: 'relative' }}>
             <button
               onClick={() => setShowDropdown(!showDropdown)}
@@ -108,24 +118,8 @@ export default function Navbar({
                 transition: 'all 0.2s ease'
               }}
             >
-              {currentUser && (
-                <img
-                  src={currentUser.avatar}
-                  alt={currentUser.name}
-                  style={{
-                    width: '28px',
-                    height: '28px',
-                    borderRadius: '50%',
-                    objectFit: 'cover',
-                    border: '1.5px solid #10B981'
-                  }}
-                />
-              )}
-              <div style={{ textAlign: 'left' }}>
-                <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>
-                  {currentUser ? currentUser.name : '選擇跑者'}
-                </span>
-              </div>
+              <Avatar src={me.avatar} name={me.name} size={28} style={{ border: '1.5px solid #10B981' }} />
+              <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{me.name}</span>
               <ChevronDown size={14} color="#94A3B8" />
             </button>
 
@@ -136,6 +130,8 @@ export default function Navbar({
                 top: '115%',
                 right: 0,
                 minWidth: '220px',
+                maxHeight: '70vh',
+                overflowY: 'auto',
                 background: '#111827',
                 border: '1px solid rgba(255, 255, 255, 0.15)',
                 borderRadius: '12px',
@@ -143,118 +139,48 @@ export default function Navbar({
                 padding: '8px',
                 zIndex: 200
               }}>
-                <div style={{ fontSize: '0.7rem', color: '#94A3B8', padding: '4px 8px', fontWeight: 600 }}>
-                  切換打卡跑者身份
-                </div>
-                {users.map((u) => (
-                  <button
-                    key={u.id}
-                    onClick={() => {
-                      onSelectUser(u);
-                      setShowDropdown(false);
-                    }}
-                    style={{
-                      width: '100%',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '10px',
-                      padding: '8px',
-                      background: currentUser?.id === u.id ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
-                      border: 'none',
-                      borderRadius: '8px',
-                      color: currentUser?.id === u.id ? '#34D399' : '#F8FAFC',
-                      cursor: 'pointer',
-                      textAlign: 'left'
-                    }}
-                  >
-                    <img
-                      src={u.avatar}
-                      alt={u.name}
-                      style={{ width: '26px', height: '26px', borderRadius: '50%', objectFit: 'cover' }}
-                    />
-                    <span style={{ fontSize: '0.85rem', fontWeight: 500, flex: 1 }}>{u.name}</span>
-                    {currentUser?.id === u.id && <UserCheck size={14} color="#10B981" />}
+                <button onClick={() => go('profile')} style={menuItemStyle}>
+                  <UserRound size={15} color="#94A3B8" /> 個人資料
+                </button>
+                {me.position === 'admin' && (
+                  <button onClick={() => go('members')} style={menuItemStyle}>
+                    <ShieldCheck size={15} color="#94A3B8" /> 成員管理
                   </button>
-                ))}
+                )}
+                {me.position === 'admin' && (
+                  <button onClick={() => go('races')} style={menuItemStyle}>
+                    <Flag size={15} color="#94A3B8" /> 賽事管理
+                  </button>
+                )}
 
-                {/* Add new user form */}
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', marginTop: '6px', paddingTop: '6px' }}>
-                  {isAddingUser ? (
-                    <form onSubmit={handleCreateUser} style={{ padding: '4px' }}>
-                      <input
-                        type="text"
-                        placeholder="跑者暱稱 (如 小明)"
-                        value={newUserName}
-                        onChange={(e) => setNewUserName(e.target.value)}
-                        autoFocus
-                        style={{
-                          width: '100%',
-                          background: 'rgba(255,255,255,0.08)',
-                          border: '1px solid rgba(255,255,255,0.2)',
-                          color: '#fff',
-                          borderRadius: '6px',
-                          padding: '6px 8px',
-                          fontSize: '0.8rem',
-                          marginBottom: '6px',
-                          outline: 'none'
-                        }}
-                      />
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <button
-                          type="submit"
-                          style={{
-                            flex: 1,
-                            background: '#10B981',
-                            color: '#000',
-                            border: 'none',
-                            borderRadius: '4px',
-                            padding: '4px',
-                            fontSize: '0.75rem',
-                            fontWeight: 700,
-                            cursor: 'pointer'
-                          }}
-                        >
-                          確定
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setIsAddingUser(false)}
-                          style={{
-                            flex: 1,
-                            background: 'rgba(255,255,255,0.1)',
-                            color: '#ccc',
-                            border: 'none',
-                            borderRadius: '4px',
-                            padding: '4px',
-                            fontSize: '0.75rem',
-                            cursor: 'pointer'
-                          }}
-                        >
-                          取消
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
+                <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', margin: '6px 0' }} />
+                <div style={{ fontSize: '0.7rem', color: '#94A3B8', padding: '4px 8px', fontWeight: 600 }}>
+                  查看跑者成績
+                </div>
+                {members.map((m) => {
+                  const active = viewingMember?.id === m.id;
+                  return (
                     <button
-                      onClick={() => setIsAddingUser(true)}
+                      key={m.id}
+                      onClick={() => {
+                        onSelectMember(m);
+                        setShowDropdown(false);
+                      }}
                       style={{
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        padding: '6px 8px',
-                        background: 'transparent',
-                        border: 'none',
-                        borderRadius: '6px',
-                        color: '#94A3B8',
-                        fontSize: '0.8rem',
-                        cursor: 'pointer'
+                        ...menuItemStyle,
+                        gap: '10px',
+                        background: active ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+                        color: active ? '#34D399' : '#F8FAFC'
                       }}
                     >
-                      <Plus size={14} /> 新增好友跑者
+                      <Avatar src={m.avatar} name={m.name} size={26} />
+                      <span style={{ fontSize: '0.85rem', fontWeight: 500, flex: 1 }}>
+                        {m.name}{m.id === me.id ? '（我）' : ''}
+                      </span>
+                      {active && <UserCheck size={14} color="#10B981" />}
                     </button>
-                  )}
-                </div>
+                  );
+                })}
               </div>
             )}
           </div>

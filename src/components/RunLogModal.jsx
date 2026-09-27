@@ -1,18 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { X, Flame, Clock, Heart, MessageSquare, Send, CheckCircle2, Sparkles, Image as ImageIcon } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import Avatar from './Avatar';
 
 export default function RunLogModal({
   isOpen,
   onClose,
-  users,
-  currentUser,
+  me,
   onSubmitRun,
   hasLineToken
 }) {
   if (!isOpen) return null;
 
-  const [selectedUserId, setSelectedUserId] = useState(currentUser ? currentUser.id : (users[0]?.id || 1));
   const [distance, setDistance] = useState('5.0');
   const [hours, setHours] = useState('0');
   const [minutes, setMinutes] = useState('26');
@@ -21,13 +20,6 @@ export default function RunLogModal({
   const [quote, setQuote] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
-
-  // Sync selected user when currentUser changes
-  useEffect(() => {
-    if (currentUser) {
-      setSelectedUserId(currentUser.id);
-    }
-  }, [currentUser]);
 
   // Compute total duration in seconds
   const totalSeconds = (parseInt(hours) || 0) * 3600 + (parseInt(minutes) || 0) * 60 + (parseInt(seconds) || 0);
@@ -83,7 +75,6 @@ export default function RunLogModal({
     setSubmitting(true);
     try {
       await onSubmitRun({
-        user_id: selectedUserId,
         distance: distNum,
         duration_seconds: totalSeconds,
         pace_seconds: paceSeconds,
@@ -140,36 +131,12 @@ export default function RunLogModal({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} style={{ padding: '24px' }}>
-          {/* Runner Selector */}
-          <div style={{ marginBottom: '18px' }}>
-            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#94A3B8', marginBottom: '8px' }}>
-              打卡跑者身份
-            </label>
-            <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
-              {users.map((u) => (
-                <button
-                  key={u.id}
-                  type="button"
-                  onClick={() => setSelectedUserId(u.id)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    padding: '6px 14px',
-                    borderRadius: '999px',
-                    border: selectedUserId === u.id ? '1.5px solid #10B981' : '1px solid rgba(255, 255, 255, 0.1)',
-                    background: selectedUserId === u.id ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.04)',
-                    color: selectedUserId === u.id ? '#6EE7B7' : '#F8FAFC',
-                    cursor: 'pointer',
-                    fontSize: '0.85rem',
-                    fontWeight: 600,
-                    whiteSpace: 'nowrap'
-                  }}
-                >
-                  <img src={u.avatar} alt={u.name} style={{ width: '22px', height: '22px', borderRadius: '50%' }} />
-                  {u.name}
-                </button>
-              ))}
+          {/* Runner (always the logged-in member) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '18px' }}>
+            <Avatar src={me.avatar} name={me.name} size={32} style={{ border: '1.5px solid #10B981' }} />
+            <div>
+              <div style={{ fontSize: '0.75rem', color: '#94A3B8' }}>打卡跑者</div>
+              <div style={{ fontWeight: 700 }}>{me.name}</div>
             </div>
           </div>
 

@@ -1,67 +1,55 @@
-import Database from 'better-sqlite3';
+import pg from 'pg';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbPath = path.join(__dirname, 'running.db');
-const db = new Database(dbPath);
-
-// Enable WAL mode for better concurrency and performance
-db.pragma('journal_mode = WAL');
-
-// Initialize tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    avatar TEXT,
-    bio TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    distance REAL NOT NULL,
-    duration_seconds INTEGER NOT NULL,
-    pace_seconds INTEGER NOT NULL,
-    heart_rate INTEGER,
-    run_type TEXT DEFAULT 'road',
-    photo_url TEXT,
-    quote TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS cheers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER NOT NULL,
-    user_name TEXT NOT NULL,
-    type TEXT DEFAULT 'fire',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-`);
-
-// Seed default settings if not exists
-const insertSetting = db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`);
-insertSetting.run('line_channel_access_token', '');
-insertSetting.run('line_group_id', '');
-insertSetting.run('team_monthly_goal_km', '250');
-insertSetting.run('bot_name', '跑友圈打卡通知小幫手');
-
-// Seed default user if empty
-const userCount = db.prepare(`SELECT COUNT(*) as count FROM users`).get().count;
-if (userCount === 0) {
-  const insertUser = db.prepare(`INSERT INTO users (name, avatar, bio) VALUES (?, ?, ?)`);
-  insertUser.run('Kevin (我)', 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80', '目標本季半馬破百！今天不跑明天後悔');
+// Load .env (Node >= 20.12 built-in)
+const envPath = path.join(__dirname, '..', '.env');
+if (fs.existsSync(envPath)) {
+  process.loadEnvFile(envPath);
 }
 
-export default db;
+if (!process.env.DATABASE_URL) {
+  throw new Error('缺少 DATABASE_URL，請參考 .env.example 建立 .env');
+}
+
+// NUMERIC / BIGINT (COUNT, SUM) come back as strings by default; parse them as numbers
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, parseFloat);
+pg.types.setTypeParser(pg.types.builtins.INT8, (v) => parseInt(v, 10));
+
+export const APP_TIMEZONE = process.env.APP_TIMEZONE || 'Asia/Taipei';
+
+// Session timezone makes `timestamptz::date` resolve to the local calendar day
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  options: `-c timezone=${APP_TIMEZONE}`
+});
+
+export async function query(text, params) {
+  return pool.query(text, params);
+}
+
+export async function queryOne(text, params) {
+  const { rows } = await pool.query(text, params);
+  return rows[0] || null;
+}
+
+export async function initDatabase() {
+  const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  await pool.query(schema);
+
+  // Bootstrap: 確保 ADMIN_LINE_ID 永遠是已核准的管理員
+  const adminLineId = process.env.ADMIN_LINE_ID;
+  if (adminLineId) {
+    await pool.query(
+      `INSERT INTO members (line_id, status, position, name) VALUES ($1, 'active', 'admin', $2)
+       ON CONFLICT (line_id) DO UPDATE SET status = 'active', position = 'admin'`,
+      [adminLineId, process.env.ADMIN_NAME || '管理員']
+    );
+  }
+}
+
+export default pool;

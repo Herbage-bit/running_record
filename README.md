@@ -211,6 +211,19 @@ CREATE TABLE settings (
 );
 ```
 
+#### ⑤ `races` (目標賽事表，首頁倒數計時)
+管理員於「賽事管理」頁面新增 / 編輯 / 刪除；首頁顯示最近一場未結束賽事的倒數（賽事當天結束後自動隱藏）。
+```sql
+CREATE TABLE races (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,               -- 賽事名稱，例如「臺北馬拉松」
+  start_at TIMESTAMPTZ NOT NULL,            -- 賽事日期 + 鳴槍時間 (以 APP_TIMEZONE 輸入)
+  created_by INTEGER REFERENCES members(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
 ---
 
 ## 七、 專案目錄結構
@@ -260,40 +273,159 @@ npm install
    ```bash
    cp .env.example .env
    ```
-2. 設定 PostgreSQL 連線字串（支援本機 PostgreSQL 或雲端如 Supabase / Neon / Railway）：
+2. 設定 PostgreSQL 連線字串（資料庫名稱大小寫需與實際一致）：
    ```env
-   DATABASE_URL=postgresql://postgres:your_password@localhost:5432/running_record
+   DATABASE_URL=postgresql://postgres:your_password@localhost:5432/Running_record
    ```
-3. 匯入資料庫結構：
-   可以使用 `psql` 或資料庫管理工具（如 DBeaver, pgAdmin）執行 [`server/schema.sql`](file:///c:/Users/kevin.chen/personal_project/running_record/server/schema.sql)：
-   ```bash
-   psql -U postgres -d running_record -f server/schema.sql
-   ```
+3. 資料表不需手動建立：後端啟動時會自動執行 [`server/schema.sql`](server/schema.sql)（皆為 `IF NOT EXISTS`，可重複執行），並將 `ADMIN_LINE_ID` 設為已核准的管理員。
 
-### 3. 同步啟動前後端 (開發模式)
-```bash
-npm run dev
+### 3. 啟動指令說明
+
+| 指令 | 用途 | 啟動內容 | 開啟網址 |
+| :--- | :--- | :--- | :--- |
+| `npm run dev` | **本機開發**（改程式碼即時生效） | Vite 前端開發伺服器 (3004) + Express 後端 (3001)，前端 `/api` 由 Vite 代理到後端 | [http://localhost:3004](http://localhost:3004) |
+| `npm run serve` | **給 LINE / ngrok 使用** | 先 `vite build` 打包前端到 `dist/`，再啟動 Express (3001)，由同一個 port 提供網頁 + API + 大頭照 | [http://localhost:3001](http://localhost:3001) |
+| `npm start` | 只啟動 Express（不重新打包） | 使用現有的 `dist/`，適合前端沒改、只重啟後端時 | [http://localhost:3001](http://localhost:3001) |
+| `npm run build` | 只打包前端 | 輸出到 `dist/` | — |
+
+> - `dev` 與 `serve` 都會使用 3001 port，**不可同時執行**，切換前先按 `Ctrl+C` 停止。
+> - Vite 開發伺服器會阻擋 ngrok 等外部網域（`Blocked request. This host is not allowed`），因此透過 LINE 開啟時務必使用 `npm run serve`，且 ngrok 指向 **3001**。
+> - 修改後端程式或 `.env` 後需重新啟動才會生效；修改前端程式後，`serve` 模式需重新執行 `npm run serve` 重新打包。
+
+### 4. LINE Developers 設定（Provider / LINE Login / LIFF）
+
+> **LINE userId 的規則**：userId 以「**人 × Provider**」計算。同一個人在同一 Provider 底下的所有 channel（LINE Login、LIFF、Messaging API 機器人）都是同一個 userId；換到不同 Provider 則不同。因此 RunSync 的 LINE Login channel 與日後推播用的 Messaging API channel **必須建立在同一個 Provider 底下**。
+
+1. **建立 Provider**
+   - 前往 [LINE Developers Console](https://developers.line.biz/console/)，以自己的 LINE 帳號登入。
+   - 在 **Providers** 區塊點擊 **Create**，輸入名稱（例如 `RunSync`）。
+2. **建立 LINE Login Channel**
+   - 進入剛建立的 Provider → **Create a new channel** → 選擇 **LINE Login**。
+   - **Region**：Taiwan；**App types**：勾選 **Web app**；其餘欄位依畫面填寫後建立。
+   - 在 channel 的 **Basic settings** 分頁取得兩個值：
+     | Console 欄位 | 位置 | 填入 `.env` |
+     | :--- | :--- | :--- |
+     | **Channel ID** | Basic settings 上方 | `LINE_LIFF_CHANNEL_ID` |
+     | **Your user ID** | Basic settings **最底部**（`U` 開頭 33 碼，即你本人的 userId） | `ADMIN_LINE_ID` |
+3. **新增 LIFF App**
+   - 在 LINE Login channel 切換到 **LIFF** 分頁 → **Add**：
+     | 欄位 | 設定值 |
+     | :--- | :--- |
+     | LIFF app name | 任意，例如 `RunSync` |
+     | Size | `Full`（或 `Tall`） |
+     | Endpoint URL | ngrok 的 https 網址，例如 `https://xxxx.ngrok-free.app`（見下方第 6 節） |
+     | Scopes | 勾選 **`openid`** 與 **`profile`**（缺少 `openid` 將無法取得 ID Token，登入驗證會失敗） |
+   - 建立後複製 **LIFF ID**（格式如 `1234567890-AbcdEfgh`）→ 填入 `.env` 的 `LINE_LIFF_ID`。
+   - LIFF 網址為 `https://liff.line.me/{LIFF ID}`，這就是分享給朋友的入口。
+4. **Channel 狀態：Developing → Published**
+   - 新建立的 channel 為 **Developing**，此時**只有 channel 管理員與 Tester 可以登入**。
+   - 自己測試成功後，點擊 channel 頁面上方的 **Developing** 切換為 **Published**，朋友才能登入。
+
+### 5. 開發模式 (dev) 測試流程
+
+開發模式不經過 LINE 登入，用 LINE ID 字串模擬身分，因此**只有一個 LINE 帳號也能測試管理員、一般成員、待審核三種角色**。權限判斷（白名單、審核、管理員限定功能）與正式 LIFF 模式是同一套程式，只有「如何得知你是誰」不同。
+
+#### ① `.env` 設定
+```env
+AUTH_MODE=dev
+DEV_LINE_ID=my_admin_id      # 預設登入身分
+ADMIN_LINE_ID=my_admin_id    # 與 DEV_LINE_ID 相同，預設登入即為管理員
 ```
-此指令會透過 `concurrently` 同時啟動：
-- 前端應用：[http://localhost:3002](http://localhost:3002)
-- 後端 API：[http://localhost:3001](http://localhost:3001)
+設定後重新執行 `npm run dev`，開啟 [http://localhost:3004](http://localhost:3004)。
 
-### 4. LINE Developers 與 LIFF 設定
-1. **建立 LINE Login Channel**：
-   - 前往 [LINE Developers Console](https://developers.line.biz/)。
-   - 建立一個 Provider 與 **LINE Login** 類型的 Channel。
-2. **新增 LIFF App**：
-   - 在 LINE Login Channel 底下切換至 **LIFF** 分頁，點擊 **Add**。
-   - **Size**：選擇 `Tall` (75% 螢幕高度) 或 `Full`。
-   - **Endpoint URL**：填入您的網頁網址（開發時需使用 HTTPS 隧道如 `ngrok` 或 `Cloudflare Tunnel`，例如 `https://your-tunnel.ngrok-free.app`）。
-   - **Scopes**：勾選 `profile` 與 `openid`。
-3. **設定官方帳號圖文選單 (Rich Menu)**：
-   - 在 [LINE Official Account Manager](https://manager.line.biz/) 建立圖文選單。
-   - 將「輸入今日跑步成績」區塊的動作類型設為 **連結 (Link)**，填入上述取得的 **LIFF URL**（例如 `https://liff.line.me/1234567890-AbcdEfgh`）。
-4. **LINE Messaging API 連線設定（群組推播）**：
-   - 在 Messaging API Channel 取得 **Channel Access Token (Long-lived)**。
-   - 將官方帳號邀請進入好友群組，取得 `groupId`。
-   - 點擊網頁右上角「**LINE 連線**」，填入 Token 與 Group ID 即可開始即時戰報推播！
+#### ② 切換測試身分
+在瀏覽器按 `F12` 開啟 Console 輸入：
+
+| 動作 | Console 指令 |
+| :--- | :--- |
+| 切換成任意身分（不存在的 ID 會自動成為待審核申請） | `localStorage.setItem('devLineId', 'U_fake_friend'); location.reload();` |
+| 切回預設身分（`DEV_LINE_ID`，即管理員） | `localStorage.removeItem('devLineId'); location.reload();` |
+
+#### ③ 完整測試腳本
+
+| 步驟 | 身分 | 操作 | 預期結果 |
+| :--- | :--- | :--- | :--- |
+| 1 | 管理員 | 開啟首頁 | 正常顯示個人數據；右上角選單有「個人資料」與「成員管理」 |
+| 2 | 管理員 | 選單 →「個人資料」修改姓名、上傳大頭照 → 儲存 | 右上角與首頁的姓名、大頭照立即更新 |
+| 3 | 新朋友 `U_fake_friend` | 切換身分後重新整理 | 顯示「歡迎加入跑友圈！請等待管理員核准」，看不到任何資料 |
+| 4 | 管理員 | 切回管理員 → 選單 →「成員管理」 | 「待審核申請」出現 `新跑友 (U_fake_friend)` |
+| 5 | 管理員 | 按「核准」 | 該成員移到「已核准成員」清單 |
+| 6 | 新朋友 | 切換回 `U_fake_friend` | 可正常使用；選單**沒有**「成員管理」 |
+| 7 | 新朋友 | 點「開跑打卡」送出一筆成績 | 成績記在自己名下（打卡視窗無法選擇其他跑者） |
+| 8 | 新朋友 | 選單 →「查看跑者成績」選擇管理員 | 可看到管理員的成績，但該頁**沒有**打卡按鈕 |
+| 9 | 管理員 | 切回管理員 →「成員管理」→ 移除 `新跑友` | 該成員與其成績一併刪除 |
+| 10 | 另一新朋友 `U_fake_friend2` | 切換身分產生申請 → 切回管理員按「拒絕」 | 申請消失；該 ID 下次開啟會重新送出申請 |
+
+> ⚠️ `X-Dev-Line-Id` 切換身分**只在 `AUTH_MODE=dev` 有效**；正式模式下後端一律只認 LINE 驗證過的 ID Token，無法偽造身分。
+
+### 6. 以 LIFF + ngrok 部署（本機伺服器）
+
+前後端都在本機執行，透過 ngrok 提供 LINE 需要的 https 網址：
+
+```
+手機 LINE ──► https://liff.line.me/{LIFF_ID}
+                  │ LINE 轉址到 LIFF Endpoint URL
+                  ▼
+      https://xxxx.ngrok-free.app ──(ngrok 通道)──► localhost:3001
+                                                    Express：網頁 (dist/) + API + 大頭照
+                                                          │
+                                                    PostgreSQL (本機)
+```
+
+#### ① 安裝與設定 ngrok
+1. 安裝 ngrok（Microsoft Store 或 [ngrok.com/download](https://ngrok.com/download)），並於 [dashboard.ngrok.com](https://dashboard.ngrok.com) 註冊。
+2. 在 Dashboard 的 **Your Authtoken** 複製 token 並執行：
+   ```bash
+   ngrok config add-authtoken <你的 token>
+   ```
+3. （建議）在 Dashboard → **Domains** 領取一個**免費固定網域**。否則每次重開 ngrok 網址都會改變，必須同步修改 LIFF Endpoint URL 與 `PUBLIC_BASE_URL`。
+
+#### ② 設定 `.env`
+```env
+# AUTH_MODE=dev                          ← 註解或刪除 (未設定即為 LIFF 模式)
+ADMIN_LINE_ID=U1234567890abcdef1234567890abcdef   # Basic settings 最底部的 Your user ID
+PUBLIC_BASE_URL=https://xxxx.ngrok-free.app       # ngrok 網址 (戰報中的大頭照需要完整網址)
+LINE_LIFF_ID=1234567890-AbcdEfgh                  # LIFF 分頁的 LIFF ID
+LINE_LIFF_CHANNEL_ID=1234567890                   # LINE Login channel 的 Channel ID
+```
+
+#### ③ 啟動（開兩個終端機）
+```bash
+# 終端機 1：打包前端並啟動伺服器，看到 "RunSync Server running at http://localhost:3001" 再進行下一步
+npm run serve
+
+# 終端機 2：開啟 ngrok 通道，務必指向 3001 (不是 Vite 的 3004)
+ngrok http 3001
+# 有固定網域時：ngrok http --url=xxxx.ngrok-free.app 3001
+```
+確認 ngrok 顯示的 `Forwarding https://... -> http://localhost:3001` 網址與 LIFF **Endpoint URL**、`.env` 的 `PUBLIC_BASE_URL` 三者一致。
+
+#### ④ 以管理員帳號測試
+1. 在 LINE 將 `https://liff.line.me/{LIFF_ID}` 傳給自己（例如 Keep 筆記）並點開。
+2. 首次開啟會出現 LINE 授權畫面 → 按「許可」。
+3. 免費版 ngrok 首次會出現警告頁（You are about to visit…）→ 按 **Visit Site**。
+4. 應以**管理員**身分進入，右上角選單有「成員管理」。
+
+#### ⑤ 邀請朋友
+1. 將 LINE Login channel 切換為 **Published**（見第 4 節第 4 點）。
+2. 將 LIFF 網址分享到群組；朋友首次開啟會自動送出加入申請。
+3. 管理員至選單 →「成員管理」核准。核准後朋友之後每次開啟都會自動登入，無需再審核。
+
+> 電腦需保持開機，且 `npm run serve` 與 ngrok 兩個終端機都要持續執行，朋友才能連線。
+
+#### ⑥ 常見問題
+
+| 狀況 | 原因 | 解法 |
+| :--- | :--- | :--- |
+| 畫面顯示 `Blocked request. This host is not allowed`，ngrok 顯示 403 | ngrok 指向 Vite 開發伺服器 (3004) | 停止 `npm run dev`，改用 `npm run serve`，ngrok 指向 **3001** |
+| 管理員本人登入卻顯示「等待核准」 | `ADMIN_LINE_ID` 與實際 userId 不同（多半是查錯 Provider） | pgAdmin 執行 `SELECT line_id FROM members WHERE status='pending';`，將查到的 ID 填回 `ADMIN_LINE_ID` 並重新啟動 |
+| 顯示「LINE 登入驗證失敗」 | `LINE_LIFF_CHANNEL_ID` 錯誤，或 LIFF Scopes 未勾選 `openid` | 檢查 Channel ID 與 LIFF Scopes |
+| 朋友無法登入，但自己可以 | channel 仍為 Developing | 切換為 **Published** |
+| 重開 ngrok 後打不開 | ngrok 網址改變 | 更新 LIFF Endpoint URL 與 `PUBLIC_BASE_URL` 後重新 `npm run serve`（或改用固定網域） |
+
+### 7. 後續設定：圖文選單與群組戰報推播（尚未完成）
+1. **官方帳號圖文選單 (Rich Menu)**：在 [LINE Official Account Manager](https://manager.line.biz/) 建立圖文選單，動作類型設為 **連結**，填入 LIFF 網址 `https://liff.line.me/{LIFF_ID}`。
+2. **群組戰報推播**：需在**同一個 Provider** 底下建立 **Messaging API channel**，取得 **Channel Access Token (Long-lived)**，並將官方帳號邀請進群組。群組的 `groupId` 只能透過 **Webhook** 事件取得，需另外設定。完成後於網頁右上角「**LINE 連線**」填入 Token 與 Group ID。
 
 ---
 

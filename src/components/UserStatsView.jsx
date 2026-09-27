@@ -1,9 +1,11 @@
 import React from 'react';
 import { Flame, Clock, Heart, Zap, Calendar, TrendingUp } from 'lucide-react';
 import { formatPace, formatDuration } from '../utils/format';
+import Avatar from './Avatar';
 
 export default function UserStatsView({
   currentUser,
+  isSelf = true,
   period,
   onChangePeriod,
   runs,
@@ -119,8 +121,8 @@ export default function UserStatsView({
         </button>
       </div>
 
-      {/* 2. Big Center Circular CTA Button */}
-      <div style={{
+      {/* 2. Big Center Circular CTA Button (only on your own page) */}
+      {isSelf && <div style={{
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -188,7 +190,7 @@ export default function UserStatsView({
             推播 LINE
           </span>
         </button>
-      </div>
+      </div>}
 
       {/* 3. Main Stats Dashboard Card */}
       <div className="glass-card" style={{
@@ -207,17 +209,11 @@ export default function UserStatsView({
           borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
           paddingBottom: '16px'
         }}>
-          <img
+          <Avatar
             src={currentUser.avatar}
-            alt={currentUser.name}
-            style={{
-              width: '50px',
-              height: '50px',
-              borderRadius: '50%',
-              objectFit: 'cover',
-              border: '2px solid #10B981',
-              boxShadow: '0 0 16px rgba(16, 185, 129, 0.3)'
-            }}
+            name={currentUser.name}
+            size={50}
+            style={{ border: '2px solid #10B981', boxShadow: '0 0 16px rgba(16, 185, 129, 0.3)' }}
           />
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

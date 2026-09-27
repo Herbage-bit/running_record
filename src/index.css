@@ -243,3 +243,42 @@ h1, h2, h3, h4, h5, h6, .sport-font {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(16, 185, 129, 0.4);
 }
+
+/* Form controls (profile / member admin pages) */
+.form-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.form-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.form-input:focus {
+  border-color: var(--volt-green);
+}
+
+.form-error {
+  color: #F87171;
+  font-size: 0.8rem;
+  margin-top: 8px;
+}
+
+.page-panel {
+  max-width: 780px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 24px;
+}
