@@ -514,6 +514,37 @@ firebase deploy --only functions    # 只部署後端（codebase: marathon）
 1. LINE Developers → LIFF 的 **Endpoint URL** 改為 `https://storck-marathon.web.app`。
 2. 環境變數 `PUBLIC_BASE_URL` 改為 `https://storck-marathon.web.app`，並將 `.env` 中的其他變數（`DATABASE_URL`、`LINE_LIFF_ID`、`LINE_LIFF_CHANNEL_ID`、`ADMIN_LINE_ID` 等）設定到 Cloud Functions 的環境變數／Secret Manager。
 
+### 9. 跨電腦搬移本機資料庫（pgAdmin 4 備份 / 還原）
+
+在多台電腦開發時，可用 pgAdmin 4 的 **Backup** / **Restore** 將本機 PostgreSQL 資料複製到另一台電腦。資料庫名稱 `Running_record` 的**大小寫必須一致**（`.env` 的 `DATABASE_URL` 以此名稱連線）。
+
+#### ① 在來源電腦備份
+1. pgAdmin 左側 Servers → PostgreSQL → Databases，對 **Running_record** 按右鍵 → **Backup...**
+2. **General** 分頁：
+   - **Filename**：例如 `running_record.backup`
+   - **Format**：**Custom**
+   - **Encoding**：UTF8
+3. **Data Options** 分頁：
+   - **Sections**：Pre-data、Data、Post-data 全部勾選
+   - **Do not save**：勾選 **Owner**（兩台電腦的 PostgreSQL 使用者可能不同，避免還原時發生權限錯誤）
+4. 按 **Backup**，等右下角顯示完成。
+
+#### ② 在目標電腦還原
+1. 對 Databases 按右鍵 → **Create → Database...**，**Database** 填 `Running_record` → Save，建立空資料庫。
+2. 對 **Running_record** 按右鍵 → **Restore...**
+   - **Format**：Custom or tar
+   - **Filename**：選擇備份檔
+   - **Data Options** → **Do not save**：勾選 **Owner**
+   - 若目標資料庫已有舊資料要整個覆蓋：**Query Options** → 勾選 **Clean before restore**
+3. 按 **Restore**。完成後展開 Schemas → public → Tables，確認 `members`、`runs`、`cheers`、`settings`、`races` 皆存在，並可對資料表按右鍵 → View/Edit Data 檢查資料。
+4. 檢查目標電腦的 `.env`：`DATABASE_URL` 的帳號、密碼、port 需符合該台電腦的 PostgreSQL 設定。
+
+#### ③ 注意事項
+- **大頭照不在資料庫中**：大頭照存放於 `server/uploads/avatars/`（已被 `.gitignore` 排除），需另外手動複製整個資料夾，否則頭像會破圖。
+- **PostgreSQL 版本**：目標電腦的版本需與來源**相同或較新**，新版產生的備份檔在舊版可能無法還原。
+- **備份檔不要提交到 git**：備份內含 LINE userId（`members.line_id`），以及透過網頁「LINE 連線」儲存的 **Channel Access Token**（`settings` 資料表），屬於帳號與機密資料，一旦推上 GitHub 就會留在 commit 歷史中，事後刪除也無法完全清除。`.gitignore` 已排除 `*.backup`、`*.sql.gz`、`db_backup/`，請改用隨身碟或私人雲端硬碟傳遞。
+- **這是一次性複製**：兩台電腦之後各自新增的資料會再次分歧，每次換電腦都需重新備份與還原。長期做法是改用雲端託管的 PostgreSQL（如 Neon、Supabase 免費方案），兩台電腦的 `DATABASE_URL` 都指向同一個資料庫；此資料庫之後也可直接沿用於 Firebase 部署（見第 8 點）。
+
 ---
 
 ## 九、 未來功能擴充規劃
