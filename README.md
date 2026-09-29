@@ -427,12 +427,100 @@ ngrok http 3001
 1. **官方帳號圖文選單 (Rich Menu)**：在 [LINE Official Account Manager](https://manager.line.biz/) 建立圖文選單，動作類型設為 **連結**，填入 LIFF 網址 `https://liff.line.me/{LIFF_ID}`。
 2. **群組戰報推播**：需在**同一個 Provider** 底下建立 **Messaging API channel**，取得 **Channel Access Token (Long-lived)**，並將官方帳號邀請進群組。群組的 `groupId` 只能透過 **Webhook** 事件取得，需另外設定。完成後於網頁右上角「**LINE 連線**」填入 Token 與 Group ID。
 
+### 8. 部署到 Firebase（規劃中，尚未實作）
+
+為了不額外開新的 Firebase 專案，採用**同一個 Firebase 專案、多個 Hosting site** 的方式：沿用既有的 storck 專案，在底下新增一個 site（例如 `storck-marathon.web.app`）。帳單、Cloud Functions、主控台與 storck 共用，但兩邊的網站**各自獨立部署、互不覆蓋**。
+
+```
+手機 LINE ──► https://liff.line.me/{LIFF_ID}
+                  │ LINE 轉址到 LIFF Endpoint URL
+                  ▼
+      https://storck-marathon.web.app   (Firebase Hosting，storck 專案底下的第二個 site)
+          ├── /**      → dist/ (前端靜態檔)
+          └── /api/**  → Cloud Functions: marathonApi (Express)
+                              ├── PostgreSQL (外部託管：Neon / Supabase)
+                              └── 大頭照 → Cloud Storage
+```
+
+> 相較於「掛在 `storck.web.app/marathon` 子路徑」的做法，獨立 site 不需要修改 Vite `base`、`API_BASE` 或 Express 路由前綴，也不會發生部署時互相覆蓋的問題。
+
+#### ① 建立 site
+
+```bash
+firebase login
+firebase projects:list                                              # 查出 storck 的專案 ID（不一定等於 storck）
+firebase hosting:sites:create storck-marathon --project <專案ID>
+```
+- 也可以在 Firebase 主控台 → Hosting → 頁面最下方「新增其他網站」建立。
+- site ID 需全球唯一，若已被使用請換名稱；一個專案最多可建立 36 個 site。
+
+#### ② 在本專案（running_record）根目錄新增 Firebase 設定
+
+Firebase CLI 會讀取**執行指令時所在資料夾**的設定檔，因此以下兩個檔案放在本 repo 根目錄（與 `package.json` 同層）；storck 的 repo 維持原樣。
+
+**`.firebaserc`**：指向 storck 所在的同一個 Firebase 專案
+```json
+{
+  "projects": { "default": "<專案ID>" }
+}
+```
+
+**`firebase.json`**
+```json
+{
+  "hosting": {
+    "site": "storck-marathon",
+    "public": "dist",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      { "source": "/api/**", "function": { "functionId": "marathonApi", "region": "asia-east1" } },
+      { "source": "**", "destination": "/index.html" }
+    ]
+  },
+  "functions": {
+    "source": "functions",
+    "codebase": "marathon"
+  }
+}
+```
+
+> ⚠️ **`"site"` 一定要寫**：若省略，部署會覆蓋專案的預設 site，也就是 `storck.web.app` 本身。
+
+#### ③ 後端搬遷（Firebase Hosting 只能放靜態檔）
+
+| 項目 | 現況 | 部署到 Firebase 後 |
+| :--- | :--- | :--- |
+| 前端 | Express 提供 `dist/` | Firebase Hosting（site：`storck-marathon`） |
+| API | 本機 Express（`server/index.js`） | 包裝成 Cloud Function `marathonApi`，Hosting 以 rewrite 將 `/api/**` 轉給它（需 **Blaze 方案**，個人使用量通常在免費額度內） |
+| 資料庫 | 本機 PostgreSQL | 外部託管 PostgreSQL（如 Neon、Supabase 免費方案） |
+| 大頭照 | `server/uploads/`（本機檔案） | **Cloud Storage**（Functions 的檔案系統重啟即消失，不能存檔） |
+
+#### ④ Cloud Functions 與 storck 共用的注意事項
+
+同一個 Firebase 專案的 Functions 是共用的，因此：
+1. **function 名稱不可與 storck 重複**：本專案使用 `marathonApi`，不使用 `api` 之類的通用名稱。
+2. **務必設定 `codebase`**（上方 `firebase.json` 已設為 `marathon`）。未設定時，在本 repo 執行 `firebase deploy --only functions` 會把「不在本機原始碼中的 function」（也就是 storck 的）列出並詢問是否刪除，誤按 Yes 會刪掉 storck 的後端。建議 storck 那邊的 `firebase.json` 也補上 `"codebase": "storck"`。
+
+#### ⑤ 部署
+
+```bash
+npm run build
+firebase deploy --only hosting      # 只部署前端
+firebase deploy --only functions    # 只部署後端（codebase: marathon）
+```
+完成後網址為 `https://storck-marathon.web.app`。
+
+#### ⑥ 部署後需同步修改的設定
+1. LINE Developers → LIFF 的 **Endpoint URL** 改為 `https://storck-marathon.web.app`。
+2. 環境變數 `PUBLIC_BASE_URL` 改為 `https://storck-marathon.web.app`，並將 `.env` 中的其他變數（`DATABASE_URL`、`LINE_LIFF_ID`、`LINE_LIFF_CHANNEL_ID`、`ADMIN_LINE_ID` 等）設定到 Cloud Functions 的環境變數／Secret Manager。
+
 ---
 
 ## 九、 未來功能擴充規劃
 
 - [x] **LINE LIFF 內嵌整合與無感登入**：全面取代 Gmail 登入，於 LINE 內直接彈出視窗並自動認證身份。
 - [x] **PostgreSQL 企業級關聯資料庫支援**：提供完整的 PostgreSQL DDL Schema 與索引優化。
+- [ ] **部署至 Firebase**：以 storck 專案底下的獨立 Hosting site 上線，後端改為 Cloud Functions（規劃見第八節第 8 點）。
 - [ ] **GPX / FIT 軌跡檔案匯入**：支援直接上傳運動手錶輸出的 GPX 路線檔，自動擷取里程與配速。
 - [ ] **朋友排行榜展開檢視**：在個人數據下方提供收合式的小型排行榜，方便查看今日誰已開跑。
 - [ ] **跑團成就勳章系統**：達成「連續 3 天晨跑」、「首次半馬 21K」、「月跑量破百」時自動解鎖特殊稱號卡片。
