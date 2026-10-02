@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Trophy, Medal, Flame, Zap, Calendar, Award } from 'lucide-react';
 import { formatPace, formatDuration } from '../utils/format';
+import { assetUrl } from '../services/api';
 
 export default function Leaderboard({
   stats,
@@ -219,7 +220,7 @@ export default function Leaderboard({
                 {/* Avatar & Name */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <img
-                    src={user.avatar}
+                    src={assetUrl(user.avatar)}
                     alt={user.name}
                     style={{
                       width: '40px',

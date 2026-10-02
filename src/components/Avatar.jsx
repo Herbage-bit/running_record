@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { assetUrl } from '../services/api';
 
 // 成員大頭照；沒有圖片或載入失敗時顯示姓名首字
 export default function Avatar({ src, name = '', size = 28, style = {} }) {
@@ -14,7 +15,7 @@ export default function Avatar({ src, name = '', size = 28, style = {} }) {
   if (src && failedSrc !== src) {
     return (
       <img
-        src={src}
+        src={assetUrl(src)}
         alt={name}
         onError={() => setFailedSrc(src)}
         style={{ ...base, objectFit: 'cover' }}

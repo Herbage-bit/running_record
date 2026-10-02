@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Share2, Copy, Check, ExternalLink, Flame } from 'lucide-react';
 import { formatPace, formatDuration } from '../utils/format';
+import { assetUrl } from '../services/api';
 
 export default function FlexPreviewModal({
   isOpen,
@@ -104,7 +105,7 @@ export default function FlexPreviewModal({
               {/* Runner Info */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
                 <img
-                  src={run.user_avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
+                  src={assetUrl(run.user_avatar) || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
                   alt={runnerName}
                   style={{ width: '36px', height: '36px', borderRadius: '50%', objectFit: 'cover', border: '1.5px solid #10B981' }}
                 />

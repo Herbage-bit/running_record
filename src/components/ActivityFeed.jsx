@@ -1,6 +1,7 @@
 import React from 'react';
 import { Flame, Clock, Heart, MessageSquare, Share2, Sparkles, BellRing, MapPin } from 'lucide-react';
 import { formatPace, formatDuration } from '../utils/format';
+import { assetUrl } from '../services/api';
 
 export default function ActivityFeed({
   runs,
@@ -97,7 +98,7 @@ export default function ActivityFeed({
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <img
-                  src={run.user_avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
+                  src={assetUrl(run.user_avatar) || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'}
                   alt={run.user_name}
                   style={{
                     width: '44px',
