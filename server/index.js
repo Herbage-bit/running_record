@@ -5,7 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { query, queryOne, initDatabase } from './db.js';
 import { requireMember, requireAdmin, AUTH_MODE } from './auth.js';
-import { buildFlexMessage, buildTextMessage, sendLinePushMessage } from './lineService.js';
+import { buildFlexMessage, buildTextMessage, sendLinePushMessage, sendLineMulticast } from './lineService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,13 +14,11 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 const DIST_DIR = path.join(__dirname, '..', 'dist');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
-const AVATAR_DIR = path.join(UPLOADS_DIR, 'avatars');
-fs.mkdirSync(AVATAR_DIR, { recursive: true });
+// 舊版大頭照存放位置，啟動時會搬進資料庫 (見 migrateLegacyAvatarFiles)
+const LEGACY_AVATAR_DIR = path.join(__dirname, 'uploads', 'avatars');
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' })); // Allows base64 image upload
-app.use('/uploads', express.static(UPLOADS_DIR));
 // Built frontend (npm run build); lets one ngrok tunnel serve both page and API
 app.use(express.static(DIST_DIR));
 
@@ -39,7 +37,12 @@ async function setSetting(key, value) {
   );
 }
 
-// LINE requires absolute https image URLs; uploaded avatars are stored as relative paths
+// Channel access token: settings page value takes precedence over .env
+async function getLineToken() {
+  return (await getSetting('line_channel_access_token')) || process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
+}
+
+// LINE requires absolute https image URLs; uploaded avatars are stored as relative paths (/avatars/...)
 function toAbsoluteUrl(url, req) {
   if (!url || /^https?:\/\//.test(url)) return url;
   const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
@@ -61,6 +64,46 @@ function periodCondition(period) {
 }
 
 const MEMBER_PUBLIC_COLUMNS = 'id, name, avatar, position, created_at';
+
+// Public (no login): uploaded avatar images, also fetched by LINE for the report cards.
+// The URL carries ?v=<timestamp> that changes on every upload, so it can be cached forever.
+app.get('/avatars/:memberId', async (req, res) => {
+  const avatar = await queryOne(
+    'SELECT mime, data FROM member_avatars WHERE member_id = $1',
+    [parseInt(req.params.memberId, 10) || 0]
+  );
+  if (!avatar) return res.status(404).end();
+  res.set('Content-Type', avatar.mime);
+  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  res.send(avatar.data);
+});
+
+// Run report photos are only kept for a short time (not long-term storage)
+const RUN_PHOTO_TTL = '7 days';
+const RUN_PHOTO_MAX_BYTES = 3 * 1024 * 1024;
+
+// Delete expired run photos and clear the runs' photo_url that pointed at them
+async function purgeExpiredRunPhotos() {
+  const { rows } = await query(
+    `DELETE FROM run_photos WHERE created_at < now() - $1::interval RETURNING run_id`,
+    [RUN_PHOTO_TTL]
+  );
+  if (rows.length > 0) {
+    await query(`UPDATE runs SET photo_url = NULL WHERE id = ANY($1)`, [rows.map((r) => r.run_id)]);
+  }
+}
+
+// Public (no login): run report photo, fetched by LINE for the report card's hero image
+app.get('/run-photos/:runId', async (req, res) => {
+  const photo = await queryOne(
+    `SELECT mime, data FROM run_photos WHERE run_id = $1 AND created_at >= now() - $2::interval`,
+    [parseInt(req.params.runId, 10) || 0, RUN_PHOTO_TTL]
+  );
+  if (!photo) return res.status(404).end();
+  res.set('Content-Type', photo.mime);
+  res.set('Cache-Control', 'public, max-age=604800');
+  res.send(photo.data);
+});
 
 // Public: frontend needs to know how to log in before calling other APIs
 app.get('/api/config', (req, res) => {
@@ -95,14 +138,28 @@ app.put('/api/me', async (req, res) => {
   res.json(updated);
 });
 
-const AVATAR_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const AVATAR_MIME_BY_EXT = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+const IMAGE_MIME_TYPES = new Set(Object.values(AVATAR_MIME_BY_EXT));
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+// Store image bytes in member_avatars and point members.avatar at the public /avatars URL
+async function saveAvatar(memberId, mime, data) {
+  await query(
+    `INSERT INTO member_avatars (member_id, mime, data, updated_at) VALUES ($1, $2, $3, now())
+     ON CONFLICT (member_id) DO UPDATE SET mime = EXCLUDED.mime, data = EXCLUDED.data, updated_at = now()`,
+    [memberId, mime, data]
+  );
+  return queryOne(
+    `UPDATE members SET avatar = $1, updated_at = now() WHERE id = $2
+     RETURNING id, line_id, name, avatar, position, created_at`,
+    [`/avatars/${memberId}?v=${Date.now()}`, memberId]
+  );
+}
 
 // Body: { image: "data:image/jpeg;base64,..." }
 app.post('/api/me/avatar', async (req, res) => {
   const match = /^data:(image\/[a-z]+);base64,(.+)$/.exec(req.body.image || '');
-  const ext = match && AVATAR_TYPES[match[1]];
-  if (!ext) {
+  if (!match || !IMAGE_MIME_TYPES.has(match[1])) {
     return res.status(400).json({ error: '僅支援 JPG / PNG / WebP 圖片' });
   }
   const buffer = Buffer.from(match[2], 'base64');
@@ -110,22 +167,7 @@ app.post('/api/me/avatar', async (req, res) => {
     return res.status(400).json({ error: '圖片大小不可超過 2MB' });
   }
 
-  const filename = `${req.member.id}-${Date.now()}.${ext}`;
-  await fs.promises.writeFile(path.join(AVATAR_DIR, filename), buffer);
-
-  const oldAvatar = req.member.avatar;
-  const updated = await queryOne(
-    `UPDATE members SET avatar = $1, updated_at = now() WHERE id = $2
-     RETURNING id, line_id, name, avatar, position, created_at`,
-    [`/uploads/avatars/${filename}`, req.member.id]
-  );
-
-  // Remove the previous uploaded avatar file
-  if (oldAvatar?.startsWith('/uploads/avatars/')) {
-    fs.promises.unlink(path.join(AVATAR_DIR, path.basename(oldAvatar))).catch(() => {});
-  }
-
-  res.json(updated);
+  res.json(await saveAvatar(req.member.id, match[1], buffer));
 });
 
 // ==========================================
@@ -177,12 +219,10 @@ app.delete('/api/members/:id', requireAdmin, async (req, res) => {
   if (id === req.member.id) {
     return res.status(400).json({ error: '無法刪除自己的帳號' });
   }
-  const deleted = await queryOne('DELETE FROM members WHERE id = $1 RETURNING id, avatar', [id]);
+  // member_avatars row is removed by ON DELETE CASCADE
+  const deleted = await queryOne('DELETE FROM members WHERE id = $1 RETURNING id', [id]);
   if (!deleted) {
     return res.status(404).json({ error: '找不到該成員' });
-  }
-  if (deleted.avatar?.startsWith('/uploads/avatars/')) {
-    fs.promises.unlink(path.join(AVATAR_DIR, path.basename(deleted.avatar))).catch(() => {});
   }
   res.json({ success: true });
 });
@@ -220,7 +260,7 @@ app.get('/api/runs', async (req, res) => {
   res.json(rows);
 });
 
-// Create a run for the logged-in member and optionally push to LINE
+// Create a run for the logged-in member and optionally push the report to the other members' LINE
 app.post('/api/runs', async (req, res) => {
   const {
     distance,
@@ -228,7 +268,7 @@ app.post('/api/runs', async (req, res) => {
     pace_seconds: inputPace,
     heart_rate,
     run_type = 'road',
-    photo_url,
+    photo, // optional data URL: "data:image/jpeg;base64,..."
     quote,
     notify_line = true
   } = req.body;
@@ -246,12 +286,24 @@ app.post('/api/runs', async (req, res) => {
     duration = Math.round(pace * dist);
   }
 
+  let photoMatch = null;
+  if (photo) {
+    photoMatch = /^data:(image\/[a-z]+);base64,(.+)$/.exec(photo);
+    if (!photoMatch || !IMAGE_MIME_TYPES.has(photoMatch[1])) {
+      return res.status(400).json({ error: '戰報配圖僅支援 JPG / PNG / WebP 圖片' });
+    }
+  }
+  const photoBuffer = photoMatch && Buffer.from(photoMatch[2], 'base64');
+  if (photoBuffer && photoBuffer.length > RUN_PHOTO_MAX_BYTES) {
+    return res.status(400).json({ error: '戰報配圖大小不可超過 3MB' });
+  }
+
   // 成績一律記在登入者本人名下，不採用前端傳來的 member_id
   const runner = req.member;
-  const createdRun = await queryOne(
-    `INSERT INTO runs (member_id, distance, duration_seconds, pace_seconds, heart_rate, run_type, photo_url, quote)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING *, $9::text AS user_name, $10::text AS user_avatar`,
+  let createdRun = await queryOne(
+    `INSERT INTO runs (member_id, distance, duration_seconds, pace_seconds, heart_rate, run_type, quote)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *, $8::text AS user_name, $9::text AS user_avatar`,
     [
       runner.id,
       dist,
@@ -259,26 +311,48 @@ app.post('/api/runs', async (req, res) => {
       pace,
       heart_rate ? parseInt(heart_rate) : null,
       run_type,
-      photo_url || null,
       quote ? quote.trim() : null,
       runner.name,
       runner.avatar
     ]
   );
 
+  if (photoBuffer) {
+    await query(
+      'INSERT INTO run_photos (run_id, mime, data) VALUES ($1, $2, $3)',
+      [createdRun.id, photoMatch[1], photoBuffer]
+    );
+    const photoUrl = `/run-photos/${createdRun.id}`;
+    await query('UPDATE runs SET photo_url = $1 WHERE id = $2', [photoUrl, createdRun.id]);
+    createdRun = { ...createdRun, photo_url: photoUrl };
+  }
+  purgeExpiredRunPhotos().catch((err) => console.error('清除過期戰報配圖失敗:', err));
+
   const clientUrl = appLinkUrl(req);
   const lineRunner = { ...runner, avatar: toAbsoluteUrl(runner.avatar, req) };
-  const flexMessage = buildFlexMessage(createdRun, lineRunner, clientUrl);
-  const textFallback = buildTextMessage(createdRun, lineRunner, clientUrl);
+  const lineRun = { ...createdRun, photo_url: toAbsoluteUrl(createdRun.photo_url, req) };
+  const flexMessage = buildFlexMessage(lineRun, lineRunner, clientUrl);
+  const textFallback = buildTextMessage(lineRun, lineRunner, clientUrl);
 
+  // 推播給其他已核准跑友 (不含打卡者本人)；在背景送出，不拖慢打卡回應
   let linePushResult = null;
   if (notify_line) {
-    linePushResult = await sendLinePushMessage({
-      token: await getSetting('line_channel_access_token'),
-      to: await getSetting('line_group_id'),
-      flexMessage,
-      textFallback
-    });
+    const recipients = await query(
+      `SELECT line_id FROM members WHERE status = 'active' AND id <> $1`,
+      [runner.id]
+    );
+    linePushResult = { queued: true, recipients: recipients.length };
+    getLineToken()
+      .then((token) => sendLineMulticast({
+        token,
+        to: recipients.map((m) => m.line_id),
+        flexMessage,
+        textFallback
+      }))
+      .then((result) => {
+        if (!result.success) console.error(`LINE 推播失敗 (run #${createdRun.id}):`, JSON.stringify(result));
+      })
+      .catch((err) => console.error(`LINE 推播失敗 (run #${createdRun.id}):`, err));
   }
 
   res.status(201).json({
@@ -436,24 +510,20 @@ app.delete('/api/races/:id', requireAdmin, async (req, res) => {
 // ==========================================
 
 app.get('/api/settings', async (req, res) => {
-  const lineToken = await getSetting('line_channel_access_token');
+  const lineToken = await getLineToken();
   res.json({
     hasToken: Boolean(lineToken && lineToken.length > 20),
     line_channel_access_token: lineToken ? `${lineToken.substring(0, 10)}...${lineToken.slice(-6)}` : '',
-    line_group_id: await getSetting('line_group_id'),
     team_monthly_goal_km: await getSetting('team_monthly_goal_km', '250'),
     bot_name: await getSetting('bot_name', '跑友圈打卡小幫手')
   });
 });
 
-app.post('/api/settings', async (req, res) => {
-  const { line_channel_access_token, line_group_id, team_monthly_goal_km, bot_name } = req.body;
+app.post('/api/settings', requireAdmin, async (req, res) => {
+  const { line_channel_access_token, team_monthly_goal_km, bot_name } = req.body;
 
   if (line_channel_access_token !== undefined && !line_channel_access_token.includes('...')) {
     await setSetting('line_channel_access_token', line_channel_access_token.trim());
-  }
-  if (line_group_id !== undefined) {
-    await setSetting('line_group_id', line_group_id.trim());
   }
   if (team_monthly_goal_km !== undefined) {
     await setSetting('team_monthly_goal_km', String(parseFloat(team_monthly_goal_km) || 250));
@@ -465,18 +535,17 @@ app.post('/api/settings', async (req, res) => {
   res.json({ success: true, message: '設定已成功儲存' });
 });
 
-// Test LINE push
-app.post('/api/settings/test-line', async (req, res) => {
-  const { line_channel_access_token, line_group_id } = req.body;
+// Test LINE push: sends a sample report to the admin's own LINE chat with the official account
+app.post('/api/settings/test-line', requireAdmin, async (req, res) => {
+  const { line_channel_access_token } = req.body;
   const token = line_channel_access_token && !line_channel_access_token.includes('...')
     ? line_channel_access_token.trim()
-    : await getSetting('line_channel_access_token');
-  const target = line_group_id ? line_group_id.trim() : await getSetting('line_group_id');
+    : await getLineToken();
 
-  if (!token || !target) {
+  if (!token) {
     return res.status(400).json({
       success: false,
-      error: '請提供完整的 LINE Channel Access Token 與目標 Group ID / User ID'
+      error: '請提供 LINE Channel Access Token'
     });
   }
 
@@ -496,7 +565,7 @@ app.post('/api/settings/test-line', async (req, res) => {
   const clientUrl = appLinkUrl(req);
   const result = await sendLinePushMessage({
     token,
-    to: target,
+    to: req.member.line_id,
     flexMessage: buildFlexMessage(dummyRun, dummyRunner, clientUrl),
     textFallback: buildTextMessage(dummyRun, dummyRunner, clientUrl)
   });
@@ -505,7 +574,7 @@ app.post('/api/settings/test-line', async (req, res) => {
 });
 
 // SPA fallback: non-API routes return the built index.html
-app.get(/^(?!\/api\/|\/uploads\/).*/, (req, res, next) => {
+app.get(/^(?!\/api\/|\/avatars\/|\/run-photos\/).*/, (req, res, next) => {
   const indexHtml = path.join(DIST_DIR, 'index.html');
   if (!fs.existsSync(indexHtml)) return next();
   res.sendFile(indexHtml);
@@ -517,7 +586,27 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || '伺服器錯誤' });
 });
 
+// One-time upgrade: move avatars saved by older versions as files (server/uploads/avatars) into the database
+async function migrateLegacyAvatarFiles() {
+  const { rows } = await query(`SELECT id, avatar FROM members WHERE avatar LIKE '/uploads/avatars/%'`);
+  for (const member of rows) {
+    const filename = path.basename(member.avatar);
+    const mime = AVATAR_MIME_BY_EXT[path.extname(filename).slice(1).toLowerCase()];
+    const data = await fs.promises.readFile(path.join(LEGACY_AVATAR_DIR, filename)).catch(() => null);
+    if (mime && data) {
+      await saveAvatar(member.id, mime, data);
+      console.log(`📦 已將成員 #${member.id} 的大頭照搬進資料庫`);
+    } else {
+      // File is gone: fall back to the default avatar instead of a broken image
+      await query('UPDATE members SET avatar = NULL WHERE id = $1', [member.id]);
+      console.warn(`⚠️ 找不到成員 #${member.id} 的大頭照檔案 ${filename}，已改回預設頭像`);
+    }
+  }
+}
+
 initDatabase()
+  .then(migrateLegacyAvatarFiles)
+  .then(purgeExpiredRunPhotos)
   .then(() => {
     app.listen(PORT, () => {
       console.log(`🏃 RunSync Server running at http://localhost:${PORT}`);

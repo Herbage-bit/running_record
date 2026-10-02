@@ -96,7 +96,7 @@ export default function FlexPreviewModal({
             {/* Optional Hero Image */}
             {run.photo_url && (
               <div style={{ maxHeight: '180px', overflow: 'hidden' }}>
-                <img src={run.photo_url} alt="戰報照片" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <img src={assetUrl(run.photo_url)} alt="戰報照片" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
               </div>
             )}
 

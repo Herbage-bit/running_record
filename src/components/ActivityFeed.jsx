@@ -213,7 +213,7 @@ export default function ActivityFeed({
                 border: '1px solid rgba(255, 255, 255, 0.1)'
               }}>
                 <img
-                  src={run.photo_url}
+                  src={assetUrl(run.photo_url)}
                   alt="跑步記錄照片"
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />

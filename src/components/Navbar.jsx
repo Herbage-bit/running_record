@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Flame, Settings, UserCheck, ChevronDown, UserRound, ShieldCheck, Flag } from 'lucide-react';
 import Avatar from './Avatar';
+
+const DROPDOWN_MIN_WIDTH = 220;
 
 const menuItemStyle = {
   width: '100%',
@@ -27,6 +29,17 @@ export default function Navbar({
   hasLineToken
 }) {
   const [showDropdown, setShowDropdown] = useState(false);
+  // 'right' opens leftwards from the button's right edge; 'left' opens rightwards (button near screen's left edge, e.g. mobile)
+  const [dropdownAlign, setDropdownAlign] = useState('right');
+  const dropdownAnchorRef = useRef(null);
+
+  const toggleDropdown = () => {
+    if (!showDropdown && dropdownAnchorRef.current) {
+      const { right } = dropdownAnchorRef.current.getBoundingClientRect();
+      setDropdownAlign(right >= DROPDOWN_MIN_WIDTH + 16 ? 'right' : 'left');
+    }
+    setShowDropdown(!showDropdown);
+  };
 
   const go = (route) => {
     onNavigate(route);
@@ -102,9 +115,9 @@ export default function Navbar({
         {/* Member Viewer & Actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
           {/* Member Dropdown */}
-          <div style={{ position: 'relative' }}>
+          <div ref={dropdownAnchorRef} style={{ position: 'relative' }}>
             <button
-              onClick={() => setShowDropdown(!showDropdown)}
+              onClick={toggleDropdown}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -128,8 +141,9 @@ export default function Navbar({
               <div style={{
                 position: 'absolute',
                 top: '115%',
-                right: 0,
-                minWidth: '220px',
+                [dropdownAlign]: 0,
+                minWidth: `${DROPDOWN_MIN_WIDTH}px`,
+                maxWidth: 'calc(100vw - 32px)',
                 maxHeight: '70vh',
                 overflowY: 'auto',
                 background: '#111827',

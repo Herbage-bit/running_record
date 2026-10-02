@@ -1,7 +1,31 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { X, Flame, Clock, Heart, MessageSquare, Send, CheckCircle2, Sparkles, Image as ImageIcon } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import Avatar from './Avatar';
+
+const PHOTO_MAX_SIDE = 1280;
+
+// 讀取手機相簿 / 電腦的圖片並等比縮小到長邊 1280px 的 JPEG (data URL)，避免上傳原始大圖
+function compressPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('無法讀取此圖片檔'));
+    };
+    img.src = url;
+  });
+}
 
 export default function RunLogModal({
   isOpen,
@@ -18,7 +42,8 @@ export default function RunLogModal({
   const [seconds, setSeconds] = useState('0');
   const [heartRate, setHeartRate] = useState('150');
   const [quote, setQuote] = useState('');
-  const [photoUrl, setPhotoUrl] = useState('');
+  const [photo, setPhoto] = useState(null); // 壓縮後的 data URL
+  const photoInputRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
 
   // Compute total duration in seconds
@@ -61,6 +86,21 @@ export default function RunLogModal({
     setSeconds(String(estSec % 60));
   };
 
+  const handlePickPhoto = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      alert('請選擇圖片檔');
+      return;
+    }
+    try {
+      setPhoto(await compressPhoto(file));
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!distNum || distNum <= 0) {
@@ -80,7 +120,7 @@ export default function RunLogModal({
         pace_seconds: paceSeconds,
         heart_rate: heartRate ? parseInt(heartRate) : null,
         run_type: 'road',
-        photo_url: photoUrl || null,
+        photo,
         quote: quote.trim() || '今天跑完超爽快，換你們開跑了！🔥',
         notify_line: true
       });
@@ -366,26 +406,69 @@ export default function RunLogModal({
             />
           </div>
 
-          {/* Optional Photo URL */}
+          {/* Optional Photo (from phone album / computer) */}
           <div style={{ marginBottom: '24px' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '0.82rem', color: '#94A3B8', marginBottom: '6px' }}>
-              <ImageIcon size={14} /> 戰報配圖或手錶截圖 URL (選填)
+              <ImageIcon size={14} /> 戰報配圖或手錶截圖 (選填)
             </label>
             <input
-              type="url"
-              value={photoUrl}
-              onChange={(e) => setPhotoUrl(e.target.value)}
-              placeholder="https://... 留空則使用預設戰報樣式"
-              style={{
-                width: '100%',
-                background: 'rgba(255, 255, 255, 0.04)',
-                border: '1px solid rgba(255, 255, 255, 0.1)',
-                borderRadius: '8px',
-                padding: '8px 12px',
-                color: '#fff',
-                fontSize: '0.85rem'
-              }}
+              ref={photoInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handlePickPhoto}
+              style={{ display: 'none' }}
             />
+            {photo ? (
+              <div style={{ position: 'relative', borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(255, 255, 255, 0.1)' }}>
+                <img src={photo} alt="戰報配圖預覽" style={{ width: '100%', maxHeight: '200px', objectFit: 'cover', display: 'block' }} />
+                <button
+                  type="button"
+                  onClick={() => setPhoto(null)}
+                  title="移除照片"
+                  style={{
+                    position: 'absolute',
+                    top: '6px',
+                    right: '6px',
+                    background: 'rgba(0, 0, 0, 0.6)',
+                    border: 'none',
+                    borderRadius: '50%',
+                    width: '28px',
+                    height: '28px',
+                    color: '#fff',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => photoInputRef.current?.click()}
+                style={{
+                  width: '100%',
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  border: '1px dashed rgba(255, 255, 255, 0.2)',
+                  borderRadius: '8px',
+                  padding: '14px 12px',
+                  color: '#94A3B8',
+                  fontSize: '0.85rem',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px'
+                }}
+              >
+                <ImageIcon size={16} /> 從相簿或電腦選擇照片
+              </button>
+            )}
+            <p style={{ fontSize: '0.72rem', color: '#64748B', marginTop: '4px' }}>
+              照片僅保留 7 天供 LINE 戰報顯示，之後會自動刪除
+            </p>
           </div>
 
           {/* Submit Button */}

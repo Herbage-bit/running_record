@@ -493,7 +493,7 @@ Firebase CLI 會讀取**執行指令時所在資料夾**的設定檔，因此以
 | 前端 | Express 提供 `dist/` | Firebase Hosting（site：`storck-marathon`） |
 | API | 本機 Express（`server/index.js`） | 包裝成 Cloud Function `marathonApi`，Hosting 以 rewrite 將 `/api/**` 轉給它（需 **Blaze 方案**，個人使用量通常在免費額度內） |
 | 資料庫 | 本機 PostgreSQL | 外部託管 PostgreSQL（如 Neon、Supabase 免費方案） |
-| 大頭照 | `server/uploads/`（本機檔案） | **Cloud Storage**（Functions 的檔案系統重啟即消失，不能存檔） |
+| 大頭照 | PostgreSQL `member_avatars` 資料表 | 不需調整，隨資料庫一起搬到外部託管 PostgreSQL |
 
 #### ④ Cloud Functions 與 storck 共用的注意事項
 
@@ -540,7 +540,7 @@ firebase deploy --only functions    # 只部署後端（codebase: marathon）
 4. 檢查目標電腦的 `.env`：`DATABASE_URL` 的帳號、密碼、port 需符合該台電腦的 PostgreSQL 設定。
 
 #### ③ 注意事項
-- **大頭照不在資料庫中**：大頭照存放於 `server/uploads/avatars/`（已被 `.gitignore` 排除），需另外手動複製整個資料夾，否則頭像會破圖。
+- **大頭照已包含在備份中**：自行上傳的大頭照存放於 `member_avatars` 資料表，備份資料庫即可一併帶走，不需另外複製檔案。
 - **PostgreSQL 版本**：目標電腦的版本需與來源**相同或較新**，新版產生的備份檔在舊版可能無法還原。
 - **備份檔不要提交到 git**：備份內含 LINE userId（`members.line_id`），以及透過網頁「LINE 連線」儲存的 **Channel Access Token**（`settings` 資料表），屬於帳號與機密資料，一旦推上 GitHub 就會留在 commit 歷史中，事後刪除也無法完全清除。`.gitignore` 已排除 `*.backup`、`*.sql.gz`、`db_backup/`，請改用隨身碟或私人雲端硬碟傳遞。
 - **這是一次性複製**：兩台電腦之後各自新增的資料會再次分歧，每次換電腦都需重新備份與還原。長期做法是改用雲端託管的 PostgreSQL（如 Neon、Supabase 免費方案），兩台電腦的 `DATABASE_URL` 都指向同一個資料庫；此資料庫之後也可直接沿用於 Firebase 部署（見第 8 點）。

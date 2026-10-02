@@ -7,9 +7,9 @@ const API_BASE = `${BACKEND_URL}/api`;
 // ngrok 免費網址會對瀏覽器請求插入警告頁，帶這個 header 才會直接回 API 結果
 const EXTRA_HEADERS = BACKEND_URL.includes('ngrok') ? { 'ngrok-skip-browser-warning': 'true' } : {};
 
-// 後端回傳的上傳檔案是相對路徑 (/uploads/...)，需補上後端網址
+// 後端回傳的大頭照 (/avatars/...) 與戰報配圖 (/run-photos/...) 是相對路徑，需補上後端網址
 export function assetUrl(path) {
-  return path?.startsWith('/uploads/') ? `${BACKEND_URL}${path}` : path;
+  return /^\/(avatars|run-photos)\//.test(path || '') ? `${BACKEND_URL}${path}` : path;
 }
 
 export class ApiError extends Error {

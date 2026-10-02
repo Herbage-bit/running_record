@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Send, Key, Users, CheckCircle2, AlertCircle, HelpCircle, ExternalLink, Save } from 'lucide-react';
+import { X, Send, Key, CheckCircle2, AlertCircle, HelpCircle, ExternalLink, Save } from 'lucide-react';
 import { testLinePush, updateSettings } from '../services/api';
 
 export default function LineSettingsModal({
@@ -11,7 +11,6 @@ export default function LineSettingsModal({
   if (!isOpen) return null;
 
   const [token, setToken] = useState(settings?.line_channel_access_token || '');
-  const [groupId, setGroupId] = useState(settings?.line_group_id || '');
   const [monthlyGoal, setMonthlyGoal] = useState(settings?.team_monthly_goal_km || '250');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -21,7 +20,6 @@ export default function LineSettingsModal({
   useEffect(() => {
     if (settings) {
       setToken(settings.line_channel_access_token || '');
-      setGroupId(settings.line_group_id || '');
       setMonthlyGoal(settings.team_monthly_goal_km || '250');
     }
   }, [settings]);
@@ -32,7 +30,6 @@ export default function LineSettingsModal({
     try {
       await onSaveSettings({
         line_channel_access_token: token,
-        line_group_id: groupId,
         team_monthly_goal_km: monthlyGoal
       });
       alert('設定已儲存成功！');
@@ -48,8 +45,7 @@ export default function LineSettingsModal({
     setTestResult(null);
     try {
       const res = await testLinePush({
-        line_channel_access_token: token,
-        line_group_id: groupId
+        line_channel_access_token: token
       });
       setTestResult(res);
     } catch (err) {
@@ -126,30 +122,9 @@ export default function LineSettingsModal({
               />
             </div>
 
-            {/* Target Group ID */}
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#F8FAFC', marginBottom: '6px' }}>
-                目標群組 Group ID (或個人 LINE User ID)
-              </label>
-              <input
-                type="text"
-                value={groupId}
-                onChange={(e) => setGroupId(e.target.value)}
-                placeholder="例如: C1234567890abcdef... 或 U1234..."
-                style={{
-                  width: '100%',
-                  background: 'rgba(255, 255, 255, 0.05)',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  borderRadius: '8px',
-                  padding: '10px 12px',
-                  color: '#fff',
-                  fontSize: '0.85rem'
-                }}
-              />
-              <p style={{ fontSize: '0.72rem', color: '#94A3B8', marginTop: '4px' }}>
-                將建立的 Bot 邀請進朋友群組即可推播；亦可輸入您個人的 User ID 先行測試。
-              </p>
-            </div>
+            <p style={{ fontSize: '0.72rem', color: '#94A3B8', marginTop: '-8px', marginBottom: '16px' }}>
+              跑友打卡後，官方帳號會私訊戰報給其他已核准、且已加官方帳號為好友的跑友 (打卡者本人不會收到)。
+            </p>
 
             {/* Monthly Goal Setting */}
             <div style={{ marginBottom: '20px' }}>
@@ -194,8 +169,8 @@ export default function LineSettingsModal({
                   <li>前往 <a href="https://developers.line.biz/" target="_blank" rel="noreferrer" style={{ color: '#38BDF8' }}>LINE Developers Console</a> 登入您的 LINE 帳號。</li>
                   <li>建立一個 Provider（例：跑友圈），接著建立 <b>Messaging API</b> Channel。</li>
                   <li>在 <b>Messaging API</b> 分頁底部的「Channel access token (long-lived)」點擊 Issue 複製產生的金鑰。</li>
-                  <li>將該 Channel 的 LINE 官方帳號（QR Code / 帳號）邀請進入您和好友的群組中。</li>
-                  <li>在 Webhook 或群組事件中獲取 Group ID 填入上方欄位即可！</li>
+                  <li>確認 LIFF 所屬的 LINE Login Channel 與此 Messaging API Channel 位於<b>同一個 Provider</b>（userId 才會相同）。</li>
+                  <li>請所有跑友掃描 QR Code 將官方帳號加為好友，之後即可收到彼此的戰報！</li>
                 </ol>
                 <div style={{ marginTop: '8px', color: '#94A3B8', fontSize: '0.72rem' }}>
                   💡 提示：若您暫時尚未申請 LINE Bot，打卡時系統仍會自動生成擬真的 LINE 戰報卡片，並提供「一鍵分享到 LINE」功能！
@@ -216,13 +191,13 @@ export default function LineSettingsModal({
               }}>
                 {testResult.success ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <CheckCircle2 size={16} /> 測試訊息已成功送出！請查看您的 LINE 群組。
+                    <CheckCircle2 size={16} /> 測試訊息已送出！請到您與官方帳號的聊天室查看。
                   </div>
                 ) : (
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
                     <AlertCircle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
                     <div>
-                      <div>發送失敗：{testResult.error || testResult.message || '請確認 Token 與 Group ID 是否正確'}</div>
+                      <div>發送失敗：{testResult.error || testResult.message || '請確認 Token 是否正確，且您已將官方帳號加為好友'}</div>
                       {testResult.details && (
                         <div style={{ fontSize: '0.7rem', marginTop: '4px', opacity: 0.8 }}>
                           {JSON.stringify(testResult.details)}

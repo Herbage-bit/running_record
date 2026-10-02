@@ -288,29 +288,19 @@ export function buildTextMessage(run, runner, appUrl = 'http://localhost:3000') 
   );
 }
 
-/**
- * Send push message via LINE Messaging API
- */
-export async function sendLinePushMessage({ token, to, flexMessage, textFallback }) {
-  if (!token || !to) {
-    return {
-      success: false,
-      reason: 'MISSING_CREDENTIALS',
-      message: '尚未設定 LINE Channel Access Token 或 Target Group/User ID'
-    };
-  }
+// LINE userId format (U + 32 hex); filters out dev placeholders like U_dev_admin
+const LINE_USER_ID_PATTERN = /^U[0-9a-f]{32}$/;
+const MULTICAST_MAX_RECIPIENTS = 500;
 
+async function postToLine(endpoint, token, body) {
   try {
-    const response = await fetch('https://api.line.me/v2/bot/message/push', {
+    const response = await fetch(`https://api.line.me/v2/bot/message/${endpoint}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`
       },
-      body: JSON.stringify({
-        to: to,
-        messages: [flexMessage, { type: 'text', text: textFallback }]
-      })
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -323,10 +313,7 @@ export async function sendLinePushMessage({ token, to, flexMessage, textFallback
       };
     }
 
-    return {
-      success: true,
-      message: '推播成功發送至 LINE！'
-    };
+    return { success: true };
   } catch (error) {
     return {
       success: false,
@@ -334,4 +321,55 @@ export async function sendLinePushMessage({ token, to, flexMessage, textFallback
       error: error.message
     };
   }
+}
+
+/**
+ * Send push message to a single user/group via LINE Messaging API
+ */
+export async function sendLinePushMessage({ token, to, flexMessage, textFallback }) {
+  if (!token || !to) {
+    return {
+      success: false,
+      reason: 'MISSING_CREDENTIALS',
+      message: '尚未設定 LINE Channel Access Token 或推播對象'
+    };
+  }
+
+  const result = await postToLine('push', token, {
+    to,
+    messages: [flexMessage, { type: 'text', text: textFallback }]
+  });
+  return result.success ? { success: true, message: '推播成功發送至 LINE！' } : result;
+}
+
+/**
+ * Send the same messages to many users (each one receives it in their chat with the official account).
+ * Only users who have added the official account as a friend will receive it.
+ */
+export async function sendLineMulticast({ token, to, flexMessage, textFallback }) {
+  if (!token) {
+    return {
+      success: false,
+      reason: 'MISSING_CREDENTIALS',
+      message: '尚未設定 LINE Channel Access Token'
+    };
+  }
+
+  const recipients = [...new Set(to)].filter((id) => LINE_USER_ID_PATTERN.test(id));
+  if (recipients.length === 0) {
+    return { success: true, recipients: 0, message: '沒有可推播的跑友' };
+  }
+
+  const messages = [flexMessage, { type: 'text', text: textFallback }];
+  const failures = [];
+  for (let i = 0; i < recipients.length; i += MULTICAST_MAX_RECIPIENTS) {
+    const batch = recipients.slice(i, i + MULTICAST_MAX_RECIPIENTS);
+    const result = await postToLine('multicast', token, { to: batch, messages });
+    if (!result.success) failures.push(result);
+  }
+
+  if (failures.length > 0) {
+    return { success: false, reason: 'LINE_API_ERROR', recipients: recipients.length, failures };
+  }
+  return { success: true, recipients: recipients.length, message: `已推播給 ${recipients.length} 位跑友` };
 }

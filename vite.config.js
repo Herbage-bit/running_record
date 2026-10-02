@@ -10,7 +10,11 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true
       },
-      '/uploads': {
+      '/avatars': {
+        target: 'http://localhost:3001',
+        changeOrigin: true
+      },
+      '/run-photos': {
         target: 'http://localhost:3001',
         changeOrigin: true
       }
